@@ -839,7 +839,9 @@ mod tests {
     fn bundled_example_matches_checked_in_file() {
         assert_eq!(
             EXAMPLE_CONFIG.trim_end(),
-            include_str!("../config.example.toml").trim_end()
+            include_str!("../config.example.toml")
+                .replace("\r\n", "\n")
+                .trim_end()
         );
         load_config(EXAMPLE_CONFIG).unwrap();
     }

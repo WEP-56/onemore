@@ -1,0 +1,129 @@
+name: Package npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            os: windows-latest
+            binary: onemore.exe
+          - platform: linux-x64
+            os: ubuntu-latest
+            binary: onemore
+          - platform: darwin-x64
+            os: macos-13
+            binary: onemore
+          - platform: darwin-arm64
+            os: macos-14
+            binary: onemore
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage platform artifact
+        shell: pwsh
+        run: |
+          $platform = "${{ matrix.platform }}"
+          $binary = "${{ matrix.binary }}"
+          $destination = Join-Path $env:GITHUB_WORKSPACE "artifact/$platform"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          $source = Join-Path $env:GITHUB_WORKSPACE "target/release/$binary"
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Release binary was not produced: $source"
+          }
+          Copy-Item -LiteralPath $source -Destination (Join-Path $destination $binary)
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onemore-${{ matrix.platform }}
+          path: artifact/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Assemble npm package
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: onemore-win32-x64
+          path: downloaded/win32-x64
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: onemore-linux-x64
+          path: downloaded/linux-x64
+
+      - name: Download macOS Intel binary
+        uses: actions/download-artifact@v4
+        with:
+          name: onemore-darwin-x64
+          path: downloaded/darwin-x64
+
+      - name: Download macOS ARM binary
+        uses: actions/download-artifact@v4
+        with:
+          name: onemore-darwin-arm64
+          path: downloaded/darwin-arm64
+
+      - name: Verify all platform binaries
+        shell: pwsh
+        run: |
+          $required = @(
+            "downloaded/win32-x64/onemore.exe",
+            "downloaded/linux-x64/onemore",
+            "downloaded/darwin-x64/onemore",
+            "downloaded/darwin-arm64/onemore"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing platform binary: $path"
+            }
+          }
+
+      - name: Build npm tarball
+        shell: pwsh
+        run: ./scripts/package-npm.ps1 -ArtifactsDir ./downloaded -OutputDir ./dist/npm -Pack -RequireAllPlatforms
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: onemore-npm-package
+          path: dist/npm/*.tgz
+          if-no-files-found: error
+          retention-days: 30

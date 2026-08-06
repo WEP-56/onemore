@@ -17,6 +17,8 @@ use onemore::runtime::{self, Agent};
 use onemore::storage::AppPaths;
 use onemore::workspace::Workspace;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const HELP: &str = "Onemore —— 可靠、实用的 Coding Agent
 
 用法:
@@ -24,6 +26,7 @@ const HELP: &str = "Onemore —— 可靠、实用的 Coding Agent
   onemore --once <提示词...>   无界面跑一轮(方便调试/脚本化)
 
 选项:
+  -v, --version          显示版本
   -c, --config <路径>    配置文件(默认平台数据目录/config.toml,不存在会生成模板)
   -p, --provider <名字>  覆盖 [agent].provider
   -h, --help             显示本帮助
@@ -33,16 +36,19 @@ struct Args {
     config: PathBuf,
     provider: Option<String>,
     once: Option<String>,
+    version: bool,
 }
 
 fn parse_args(default_config: PathBuf) -> Result<Option<Args>> {
     let mut config = default_config;
     let mut provider = None;
     let mut once = None;
+    let mut version = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
+            "-v" | "--version" => version = true,
             "-c" | "--config" => {
                 config = PathBuf::from(
                     it.next()
@@ -70,6 +76,7 @@ fn parse_args(default_config: PathBuf) -> Result<Option<Args>> {
         config,
         provider,
         once,
+        version,
     }))
 }
 
@@ -79,6 +86,10 @@ fn main() -> Result<()> {
         print!("{}", HELP);
         return Ok(());
     };
+    if args.version {
+        println!("onemore {}", VERSION);
+        return Ok(());
+    }
     paths.ensure()?;
 
     // 首次运行:生成配置模板后退出,提示用户填 key

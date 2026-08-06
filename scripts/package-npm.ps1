@@ -54,7 +54,7 @@ $vendorDir = Join-Path $packageDir "vendor"
 New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "bin"), $vendorDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $repoRoot "npm/bin/onemore.js") -Destination (Join-Path $packageDir "bin/onemore.js")
-Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination (Join-Path $packageDir "README.md")
+Copy-Item -LiteralPath (Join-Path $repoRoot "npm/README.md") -Destination (Join-Path $packageDir "README.md")
 Copy-Item -LiteralPath (Join-Path $repoRoot "docs") -Destination (Join-Path $packageDir "docs") -Recurse
 
 $platforms = [ordered]@{
