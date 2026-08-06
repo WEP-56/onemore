@@ -2,7 +2,7 @@
 
 > 研究对象：Grok Build `ed6d543643628663873c5de28298e022ed634238`、OpenAI Codex `ed2f985a26eee9a59cde0fdefd20f69b45bc25f5`。
 >
-> 本文是对上述本地源码快照的观察，不代表两个上游项目当前版本的行为。文中的路径均相对于工作区根目录 `E:\harness from scratch`。
+> 本文是对上述本地源码快照的观察，不代表两个上游项目当前版本的行为。文中的 Onemore 源码路径均相对于当前仓库根目录。
 
 ## 结论摘要
 
@@ -50,14 +50,14 @@ ToolSpec + capabilities + permission
 
 源码依据：
 
-- `onemore-cli/src/session.rs:8-24` 定义追加式 `SessionEntryPayload`；`onemore-cli/src/storage.rs:5-12` 明确 append-only、事务提交与单向投影约束。
-- `onemore-cli/src/session.rs:162-207` 从事实生成模型消息，压缩只改变视图，不删除旧事实。
-- `onemore-cli/src/event.rs:35-102` 是 Runtime 到所有前端的事件边界。
-- `onemore-cli/src/tools/mod.rs:21-72` 把执行模式、只读/破坏性能力和审批声明放在厂商无关的 `ToolSpec` 上。
-- `onemore-cli/src/tools/mod.rs:96-118` 将模型正文、UI 摘要和非模型结构化 details 分开；结果正文统一受 `RESULT_MAX_CHARS = 24_000` 限制（`onemore-cli/src/tools/mod.rs:19`）。
-- `onemore-cli/src/runtime.rs:540-576` 保证一个工具批次的 `ToolUse` 和全部 `ToolResult` 原子提交。
-- `onemore-cli/src/provider/mod.rs:171-203` 将排序后的工具定义和 messages 纳入完整 `prompt_fingerprint`；`prompt_cache_key` 只覆盖稳定的 profile/model/system/tools 前缀（`onemore-cli/src/provider/mod.rs:206-225`）。实际工具排序见 `onemore-cli/src/provider/mod.rs:181-183`。
-- `onemore-cli/src/context/mod.rs:1-12` 已明确 Session Fact、模型上下文和 UI 历史不是同一对象，并把 Planning Context 列为扩展位。
+- `src/session.rs:8-24` 定义追加式 `SessionEntryPayload`；`src/storage.rs:5-12` 明确 append-only、事务提交与单向投影约束。
+- `src/session.rs:162-207` 从事实生成模型消息，压缩只改变视图，不删除旧事实。
+- `src/event.rs:35-102` 是 Runtime 到所有前端的事件边界。
+- `src/tools/mod.rs:21-72` 把执行模式、只读/破坏性能力和审批声明放在厂商无关的 `ToolSpec` 上。
+- `src/tools/mod.rs:96-118` 将模型正文、UI 摘要和非模型结构化 details 分开；结果正文统一受 `RESULT_MAX_CHARS = 24_000` 限制（`src/tools/mod.rs:19`）。
+- `src/runtime.rs:540-576` 保证一个工具批次的 `ToolUse` 和全部 `ToolResult` 原子提交。
+- `src/provider/mod.rs:171-203` 将排序后的工具定义和 messages 纳入完整 `prompt_fingerprint`；`prompt_cache_key` 只覆盖稳定的 profile/model/system/tools 前缀（`src/provider/mod.rs:206-225`）。实际工具排序见 `src/provider/mod.rs:181-183`。
+- `src/context/mod.rs:1-12` 已明确 Session Fact、模型上下文和 UI 历史不是同一对象，并把 Planning Context 列为扩展位。
 
 因此新特性应该扩展现有边界，不应另建一套聊天记录、权限系统或前端专用状态库。
 
@@ -294,7 +294,7 @@ PlanUpdated(PlanSnapshot)
 
 `reduce_plan(entries)` 从零开始按顺序读取 `PlanUpdated`：首个 revision 必须为 1，后续必须恰好 `previous + 1`。新写入必须通过 reducer；读旧库遇到非法事实时保留最后一个合法快照并产生 diagnostic，不能 panic 或反向改库。
 
-工具 reducer 生成 `PlanUpdateEffect`，Runtime 将 `assistant ToolUse + PlanUpdated Fact + ToolResult` 放入同一事务。不要借用 `ToolOutput.details` 作为隐式持久化通道；应新增明确的 harness-owned tool effect，因为 details 当前语义是“不进入模型的结构化展示信息”（`onemore-cli/src/tools/mod.rs:113-118`）。
+工具 reducer 生成 `PlanUpdateEffect`，Runtime 将 `assistant ToolUse + PlanUpdated Fact + ToolResult` 放入同一事务。不要借用 `ToolOutput.details` 作为隐式持久化通道；应新增明确的 harness-owned tool effect，因为 details 当前语义是“不进入模型的结构化展示信息”（`src/tools/mod.rs:113-118`）。
 
 #### Agent events
 
@@ -557,7 +557,7 @@ spawn 先原子 reserve slot，再创建 Fact 与 child；任何失败由 RAII r
 
 ## Prompt Cache 影响总表
 
-Onemore 的完整 `prompt_fingerprint` 包含 profile、model、system、排序后的工具定义和 messages（`onemore-cli/src/provider/mod.rs:189-203`），所以正常追加历史也会改变它；稳定的 `prompt_cache_key` 只包含 profile、model、system 和工具定义（`onemore-cli/src/provider/mod.rs:206-225`）。缓存复用的关键是保持后者及实际请求前缀稳定，动态运行状态应尽量只追加到消息尾部。
+Onemore 的完整 `prompt_fingerprint` 包含 profile、model、system、排序后的工具定义和 messages（`src/provider/mod.rs:189-203`），所以正常追加历史也会改变它；稳定的 `prompt_cache_key` 只包含 profile、model、system 和工具定义（`src/provider/mod.rs:206-225`）。缓存复用的关键是保持后者及实际请求前缀稳定，动态运行状态应尽量只追加到消息尾部。
 
 | 特性 | 会改变稳定前缀/工具 schema 的内容 | 会话内策略 | 预期 cache 影响 |
 |---|---|---|---|

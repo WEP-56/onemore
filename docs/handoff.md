@@ -5,7 +5,7 @@
 The open-source coding-agent research pass is complete. Its primary result and source of truth is:
 
 ```text
-E:\harness from scratch\onemore-cli\docs\open-source-agent-research.md
+E:\onemore-cli\docs\open-source-agent-research.md
 ```
 
 Read that document before designing advanced features. It contains the evidence-backed comparison, invariants, failure cases, proposed Onemore types/events/facts/tests, cache implications, and staged delivery recommendation. Do not re-run the broad Grok Build/Codex survey unless a specific claim needs revalidation against a newer upstream snapshot.
@@ -19,7 +19,7 @@ Recommended implementation order from the research:
 
 ## Current Onemore State
 
-Repository: `E:\harness from scratch\onemore-cli`
+Repository: `E:\onemore-cli`
 
 Source crate version: `0.4.0`
 Windows npm test package: `onemore-agent@0.5.0`
@@ -259,7 +259,7 @@ Questions:
 
 ## Completed Research Deliverable
 
-The completed result is `onemore-cli/docs/open-source-agent-research.md`. It includes:
+The completed result is `docs/open-source-agent-research.md`. It includes:
 
 1. a compact architecture map for each reference project;
 2. a behavior and data-model comparison for Todo, Skills, MCP, and Subagents;
@@ -274,7 +274,7 @@ Treat this document as the baseline for follow-up design. The research pass itse
 ## Recommended First Commands
 
 ```powershell
-Get-Content "E:\harness from scratch\onemore-cli\docs\handoff.md"
-Get-Content "E:\harness from scratch\onemore-cli\docs\open-source-agent-research.md"
+Get-Content ".\docs\handoff.md"
+Get-Content ".\docs\open-source-agent-research.md"
 rg -n "initialize|tools/list|tools/call|cancellation|timeout|shutdown" "E:\harness from scratch\example\grok-build\crates\codegen\xai-grok-mcp" "E:\harness from scratch\example\codex\codex-rs\codex-mcp"
 ```

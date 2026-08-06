@@ -7,7 +7,7 @@
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
 - [CacheBoard 测试项目需求书](docs/cacheboard-test-project-cn.md)
 
-Onemore 是从 Zerone 教学基线迁移出的独立 coding agent 工程,并已按
+Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出的独立 coding agent 工程,并已按
 [project.md](project.md) 的路线完成 1-6 阶段的工程化改造:Provider 终止协议、
 类型化工具管线、权限与 Hook、事实日志与上下文预算、steering/follow-up 队列、
 受控并发与资源锁、结构化计划与长任务纪律。Zerone 的目标是"一条数据流容易读懂";
