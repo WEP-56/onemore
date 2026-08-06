@@ -209,6 +209,11 @@ npm install --global .\dist\npm\onemore-agent-0.5.0.tgz
 onemore --help
 ```
 
+项目也上传了npm包，但不保证除windows外的可用性
+```
+npm install -g onemore-agent
+```
+
 本地打包只包含当前平台二进制。跨平台组包可通过 `-ArtifactsDir` 提供对应产物。
 
 ## 验证
