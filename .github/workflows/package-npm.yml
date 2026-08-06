@@ -28,15 +28,15 @@ jobs:
             os: ubuntu-latest
             binary: onemore
           - platform: darwin-x64
-            os: macos-13
+            os: macos-15-intel
             binary: onemore
           - platform: darwin-arm64
-            os: macos-14
+            os: macos-15
             binary: onemore
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,7 +61,7 @@ jobs:
           Copy-Item -LiteralPath $source -Destination (Join-Path $destination $binary)
 
       - name: Upload platform artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: onemore-${{ matrix.platform }}
           path: artifact/${{ matrix.platform }}
@@ -75,28 +75,28 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download Windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onemore-win32-x64
           path: downloaded/win32-x64
 
       - name: Download Linux binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onemore-linux-x64
           path: downloaded/linux-x64
 
       - name: Download macOS Intel binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onemore-darwin-x64
           path: downloaded/darwin-x64
 
       - name: Download macOS ARM binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: onemore-darwin-arm64
           path: downloaded/darwin-arm64
@@ -121,7 +121,7 @@ jobs:
         run: ./scripts/package-npm.ps1 -ArtifactsDir ./downloaded -OutputDir ./dist/npm -Pack -RequireAllPlatforms
 
       - name: Upload npm package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: onemore-npm-package
           path: dist/npm/*.tgz
