@@ -7,12 +7,7 @@
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
 - [CacheBoard 测试项目需求书](docs/cacheboard-test-project-cn.md)
 
-Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出的独立 coding agent 工程,并已按
-[project.md](project.md) 的路线完成 1-6 阶段的工程化改造:Provider 终止协议、
-类型化工具管线、权限与 Hook、事实日志与上下文预算、steering/follow-up 队列、
-受控并发与资源锁、结构化计划与长任务纪律。Zerone 的目标是"一条数据流容易读懂";
-Onemore 在保留这条数据流的前提下,把目标换成了"每个中断点都有确定的历史、
-事件、队列和资源状态"。
+Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出的独立 coding agent 工程
 
 ## 运行
 
@@ -37,13 +32,15 @@ TUI 内常用操作:
 | 操作 | 说明 |
 |---|---|
 | 运行中输入并回车 | steering:在当前一批工具全部完成并提交后注入,修正方向 |
-| `/queue <内容>` | follow-up:排队后续任务,当前任务将停止时才注入 |
-| `/compact` | 调模型生成摘要作为 Compaction 事实;模型视图缩小,事实日志不减少 |
+| `/queue <内容>` | follow-up:排队后续任务,当前任务将停止时才注入，在agent运行中直接发送消息也可以“插嘴” |
+| `/compact` | 调用模型生成摘要作为 Compaction 事实;模型视图缩小,事实日志不减少 |
 | `Esc` | 取消当前轮(丢弃半截流式输出;未执行的工具调用补取消结果;清空排队输入) |
 | `/session [ID]` | 列出/恢复会话,恢复时重建全部事实(含 UI-only 提示) |
 | `/provider` | 只切换 provider，使用其默认模型，历史保留 |
-| `/model` | 只列出当前 provider 的模型；选模型后再确认思考程度 |
+| `/model` | 只列出当前 provider 的模型；选模型后再确认思考程度，可以在配置文件中自定义思考程度名称 |
 | `/reasoning` (`/effort`) | 调整当前模型的思考程度 |
+| `/clear` | 新建会话 |
+
 
 ## 与 Zerone 的区别
 
@@ -188,7 +185,7 @@ workspace/provider/model 保存；切回该模型的 `default_effort` 时删除�
 ## 存储
 
 ```text
-%APPDATA%/onemore/  # Windows 默认；其他平台使用 XDG 数据目录
+%APPDATA%/romaing/onemore/  # Windows 默认；其他平台使用 XDG 数据目录
   config.toml
   sessions/
     <session-id>.db            # schema v4:事实日志 + 严格计划 reducer + token/cache 用量
