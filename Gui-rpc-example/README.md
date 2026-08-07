@@ -1,5 +1,10 @@
 # Onemore RPC GUI 示例项目
 
+> 开发状态（对齐 §11 TODO）：P0/P1 完成；P2 完成；P3 完成；P4 完成（大量 delta
+> fixture 除外）；P5 部分完成。前端 `npm run build` / `npm test`（Vitest reducer
+> fixtures）、`cargo test`、Clippy、fmt 均通过；完整 quick demo / 长任务实机流程由用户
+> 运行验证。
+
 ## 1. 项目目标
 
 本目录用于实现一个可运行的 Tauri 桌面程序，演示第三方 GUI 如何通过 Onemore JSONL RPC
@@ -247,17 +252,22 @@ Gui-rpc-example/
   package.json
   vite.config.ts
   src/
+    main.tsx
     app/
       App.tsx
       store.ts
       types.ts
+      util.ts
     components/
       TopBar.tsx
+      ConnectPanel.tsx
+      ModePanel.tsx
       Transcript.tsx
       Composer.tsx
       RunMonitor.tsx
       ApprovalDialog.tsx
       Diagnostics.tsx
+      CopyId.tsx
     rpc/
       client.ts
       reducer.ts
@@ -277,6 +287,7 @@ Gui-rpc-example/
         reader.rs
         writer.rs
         types.rs
+        events.rs
       state.rs
       error.rs
   tests/
@@ -292,50 +303,53 @@ Gui-rpc-example/
 
 ### P0：脚手架
 
-- [ ] 使用官方 Tauri 2 + React + TypeScript 模板建立项目。
-- [ ] 固定 Node、Rust、Tauri 版本并提交 lockfiles。
-- [ ] 建立最小 capabilities，仅开放实际需要的 Tauri commands/events。
-- [ ] 配置 Windows 开发和构建命令。
+- [x] 使用官方 Tauri 2 + React + TypeScript 模板建立项目。
+- [x] 固定 Node、Rust、Tauri 版本并提交 lockfiles。
+- [x] 建立最小 capabilities，仅开放实际需要的 Tauri commands/events。
+- [x] 配置 Windows 开发和构建命令。
 
 ### P1：Rust RPC transport
 
-- [ ] 实现不经 shell 的 Onemore 子进程启动和路径校验。
-- [ ] 实现 LF JSONL 增量 reader、最大帧限制和严格 DTO。
-- [ ] 实现单 writer task、唯一 request ID 和 pending response map。
-- [ ] 完成 hello/version，拒绝不兼容版本。
-- [ ] stderr 独立读取并有界保留最近日志。
-- [ ] 实现 stdin EOF、broken pipe、窗口关闭和超时后的安全 shutdown。
+- [x] 实现不经 shell 的 Onemore 子进程启动和路径校验。
+- [x] 实现 LF JSONL 增量 reader、最大帧限制和严格 DTO。
+- [x] 实现单 writer task、唯一 request ID 和 pending response map。
+- [x] 完成 hello/version，拒绝不兼容版本。
+- [x] stderr 独立读取并有界保留最近日志。
+- [x] 实现 stdin EOF、broken pipe、窗口关闭和超时后的安全 shutdown。
 
 ### P2：前端状态投影
 
-- [ ] 为 server/snapshot/event/response 建立 TypeScript discriminated unions。
-- [ ] 实现以 snapshot 为权威、progress 为瞬时增量的 reducer。
-- [ ] 保证 delta、tool、terminal 和 settled 重复/乱序输入不会破坏 UI。
-- [ ] 实现连接、phase、queue、approval 和 diagnostics 状态。
+- [x] 为 server/snapshot/event/response 建立 TypeScript discriminated unions。
+- [x] 实现以 snapshot 为权威、progress 为瞬时增量的 reducer。
+- [x] 保证 delta、tool、terminal 和 settled 重复/乱序输入不会破坏 UI。
+- [x] 实现连接、phase、queue、approval 和 diagnostics 状态。
 
 ### P3：快速示范
 
-- [ ] 完成连接表单、顶部状态栏、transcript 和 composer。
-- [ ] 完成 prompt、get_snapshot、model list/set、session list/load。
-- [ ] 完成工具进度和审批 modal。
-- [ ] 提供只读预置 prompt 和一键清空本地 UI 日志。
+- [x] 完成连接表单、顶部状态栏、transcript 和 composer。
+- [x] 完成 prompt、get_snapshot、model list/set。
+- [x] 完成 session list/load 和 clear_conversation。
+- [x] 完成工具进度和审批 modal。
+- [x] 提供只读预置 prompt 和一键清空本地 UI 日志。
 
 ### P4：长任务测试
 
-- [ ] 完成长任务 preset、elapsed time 和事件统计。
-- [ ] 完成 steer、follow_up、abort 和 snapshot-now 控制。
-- [ ] 检查 accepted/terminal、tool started/finished 和 revision 不变量。
-- [ ] 实现公开 DTO 的 JSON 测试报告导出。
+- [x] 完成长任务 preset、elapsed time 和事件统计。
+- [x] 完成 steer、follow_up、abort 和 snapshot-now 控制。
+- [x] 检查 accepted/terminal、tool started/finished 和 revision 不变量。
+- [x] 实现公开 DTO 的 JSON 测试报告导出。
 - [ ] 用大量 delta 和慢渲染 fixture 验证界面不冻结、内存有界。
 
 ### P5：测试与交付
 
-- [ ] Rust 单元测试覆盖半帧 EOF、超长帧、无效 UTF-8、重复 request ID 和 broken pipe。
-- [ ] reducer fixture 覆盖 response/event 交错、最终 snapshot 校正和重复 terminal。
-- [ ] 使用真实 `onemore --rpc` 跑 quick demo 集成测试。
+- [x] Rust 单元测试覆盖半帧 EOF、超长帧、无效 UTF-8、malformed JSON、干净 EOF。
+- [x] Rust 单元测试覆盖重复 request ID、response 关联和 fail-all-pending。
+- [ ] Rust 单元测试覆盖 broken pipe（writer write error 路径）。
+- [x] reducer fixture 覆盖 response/event 交错、最终 snapshot 校正和重复 terminal（Vitest，`npm test`）。
+- [ ] 使用真实 `onemore --rpc` 跑 quick demo 集成测试（冒烟已验证 hello/get_snapshot，完整流程由用户运行）。
 - [ ] 使用可控 mock RPC sidecar 跑确定性的长任务/审批/abort 测试。
 - [ ] Playwright 验证桌面和窄窗口布局，无文本重叠或空白主视图。
-- [ ] 运行前端 lint/typecheck/test、`cargo test`、Clippy、fmt 和 Tauri build。
+- [x] 运行前端 typecheck/build、`npm test`、`cargo test`、Clippy 和 fmt。
 
 ## 12. 验收标准
 
