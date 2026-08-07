@@ -3,13 +3,10 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 
-use crate::config::{ActiveModelSelection, Config};
-use crate::context::budget::{apply_budget, BudgetDecision};
-use crate::context::PromptContext;
+use crate::config::{ActiveModelSelection, Config, ProviderSettings};
 use crate::event::{AgentCommand, AgentEvent};
-use crate::message::{ChatMessage, Usage};
-use crate::session::{project_model_messages, ModelChangeRecord, SessionEntryPayload};
-use crate::tools::ToolSpec;
+use crate::message::Usage;
+use crate::session::{ModelChangeRecord, SessionEntryPayload};
 use crate::workspace::Workspace;
 
 use super::{budget_from_settings, Agent, AgentBuilder};
@@ -17,6 +14,11 @@ use super::{budget_from_settings, Agent, AgentBuilder};
 impl Agent {
     pub fn builder(config: Config, workspace: Workspace) -> AgentBuilder {
         AgentBuilder::new(config, workspace)
+    }
+
+    /// Construct directly from one resolved provider/model without a file Config.
+    pub fn builder_from_provider(settings: ProviderSettings, workspace: Workspace) -> AgentBuilder {
+        AgentBuilder::from_provider_settings(settings, workspace)
     }
 
     pub fn new(config: Config, workspace: Workspace) -> anyhow::Result<Agent> {
@@ -65,7 +67,7 @@ impl Agent {
         cancel: &AtomicBool,
         inbox: Option<&Receiver<AgentCommand>>,
     ) -> bool {
-        self.emit_skill_discovery(emit);
+        self.emit_startup_events(emit);
         match cmd {
             // 空闲时三者等价:都开启一个新的运行。
             AgentCommand::UserInput(text)
@@ -146,26 +148,21 @@ impl Agent {
         }
     }
 
-    pub(super) fn emit_skill_discovery(&mut self, emit: &mut dyn FnMut(AgentEvent)) {
-        if self.skills_announced {
-            return;
+    pub(super) fn emit_startup_events(&mut self, emit: &mut dyn FnMut(AgentEvent)) {
+        while let Some(event) = self.startup_events.pop_front() {
+            emit(event);
         }
-        self.skills_announced = true;
-        emit(AgentEvent::SkillsDiscovered {
-            skills: self.skills.ordered.clone(),
-            warnings: std::mem::take(&mut self.skill_warnings),
-        });
     }
 
     fn preferred_default_selection(&self, provider: &str) -> anyhow::Result<ActiveModelSelection> {
-        let mut selection = self.config.default_selection(provider)?;
+        let mut selection = self.models.default_selection(provider)?;
         if let Some(saved) = self
-            .workspace_preferences
+            .model_preferences
             .effort(&selection.provider, &selection.model)
         {
             let mut preferred = selection.clone();
             preferred.effort = saved.to_string();
-            if self.config.validate_selection(&preferred).is_ok() {
+            if self.models.validate_selection(&preferred).is_ok() {
                 selection = preferred;
             }
         }
@@ -177,7 +174,7 @@ impl Agent {
         selection: ActiveModelSelection,
         emit: &mut dyn FnMut(AgentEvent),
     ) {
-        let settings = match self.config.resolve_selection(&selection) {
+        let settings = match self.models.resolve_selection(&selection) {
             Ok(settings) => settings,
             Err(error) => {
                 emit(AgentEvent::Error(format!("切换失败: {:#}", error)));
@@ -187,15 +184,14 @@ impl Agent {
         let next_budget = budget_from_settings(&settings);
         let next_provider = (self.provider_factory)(settings);
         let default_effort = self
-            .config
+            .models
             .model_default_effort(&selection.provider, &selection.model)
-            .expect("resolved selection must have a normalized default effort")
-            .to_string();
+            .expect("resolved selection must have a normalized default effort");
         let previous_effort = self
-            .workspace_preferences
+            .model_preferences
             .effort(&selection.provider, &selection.model)
             .map(str::to_string);
-        if let Err(error) = self.workspace_preferences.set_effort(
+        if let Err(error) = self.model_preferences.set_effort(
             &selection.provider,
             &selection.model,
             &selection.effort,
@@ -209,7 +205,7 @@ impl Agent {
         }
         if !self.record_model_change(&selection, emit) {
             let restore = previous_effort.as_deref().unwrap_or(&default_effort);
-            if let Err(error) = self.workspace_preferences.set_effort(
+            if let Err(error) = self.model_preferences.set_effort(
                 &selection.provider,
                 &selection.model,
                 restore,
@@ -271,63 +267,12 @@ impl Agent {
         }
     }
 
-    /// 组装本轮 prompt 的 system 部分(messages 由事实投影 + 预算决定)。
-    pub(super) fn build_system_prompt(&self) -> PromptContext {
-        let mut prompt = PromptContext::default();
-        for c in &self.extra_context {
-            c.contribute(&mut prompt, &self.workspace);
+    #[cfg(test)]
+    pub(super) fn build_system_prompt(&self) -> crate::context::PromptContext {
+        let mut prompt = crate::context::PromptContext::default();
+        for context in &self.extra_context {
+            context.contribute(&mut prompt, &self.workspace);
         }
         prompt
     }
-
-    /// 投影 + 预算:决定本轮真正发给模型的消息。
-    /// 返回 None 表示超出预算被拒绝(事件已发出),调用方应结束本轮。
-    pub(super) fn project_for_model(
-        &self,
-        prompt: &PromptContext,
-        specs: &[ToolSpec],
-        emit: &mut dyn FnMut(AgentEvent),
-    ) -> Option<Vec<ChatMessage>> {
-        let projection = project_model_messages(&self.entries);
-        for diagnostic in &projection.diagnostics {
-            // 防御性修复只该发生在旧库/损坏数据上;必须让用户看见,而不是静默掩盖。
-            emit(AgentEvent::Notice(format!("历史投影修复: {}", diagnostic)));
-        }
-        let system_chars = prompt.system_text().chars().count() as u64;
-        let tools_chars = tool_spec_chars(specs);
-        match apply_budget(&self.budget, system_chars, tools_chars, projection) {
-            BudgetDecision::Send {
-                messages, notices, ..
-            } => {
-                for notice in notices {
-                    emit(AgentEvent::Notice(notice));
-                }
-                Some(messages)
-            }
-            BudgetDecision::Refuse {
-                estimated_tokens,
-                available_tokens,
-            } => {
-                emit(AgentEvent::Error(format!(
-                    "上下文估算约 {} tokens,超出可用预算 {}(窗口扣除输出预留)。\
-                     未发送请求;请用 /compact 压缩历史,或 /clear 重新开始。",
-                    estimated_tokens, available_tokens
-                )));
-                None
-            }
-        }
-    }
-}
-
-/// 工具声明进入请求体的近似字符成本(name + description + schema JSON)。
-fn tool_spec_chars(specs: &[ToolSpec]) -> u64 {
-    specs
-        .iter()
-        .map(|spec| {
-            (spec.name.chars().count()
-                + spec.description.chars().count()
-                + spec.schema.to_string().chars().count()
-                + 32) as u64
-        })
-        .sum()
 }

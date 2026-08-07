@@ -517,15 +517,24 @@ pub fn default_registry(
     shell: Shell,
     skills: std::sync::Arc<crate::skills::SkillCatalog>,
 ) -> ToolRegistry {
-    ToolRegistry::new(vec![
+    let mut tools = default_tools(shell);
+    tools.push(Box::new(load_skill::LoadSkill::new(skills)));
+    ToolRegistry::new(tools)
+}
+
+pub(crate) fn default_registry_without_skills(shell: Shell) -> ToolRegistry {
+    ToolRegistry::new(default_tools(shell))
+}
+
+fn default_tools(shell: Shell) -> Vec<Box<dyn Tool>> {
+    vec![
         Box::new(read_file::ReadFile),
         Box::new(list_dir::ListDir),
         Box::new(write_file::WriteFile),
         Box::new(edit_file::EditFile),
         Box::new(run_command::RunCommand::new(shell)),
         Box::new(update_plan::UpdatePlan),
-        Box::new(load_skill::LoadSkill::new(skills)),
-    ])
+    ]
 }
 
 pub(crate) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {

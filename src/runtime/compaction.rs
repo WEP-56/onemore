@@ -2,6 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
+use crate::agent_loop::{call_model, ModelCallResult};
 use crate::context::budget::estimate_tokens;
 use crate::context::PromptContext;
 use crate::event::AgentEvent;
@@ -10,7 +11,6 @@ use crate::plan::{compaction_summary as plan_compaction_summary, reduce_plan};
 use crate::session::{project_model_messages, CompactionRecord, SessionEntryPayload};
 use crate::util;
 
-use super::agent_loop::CallResult;
 use super::Agent;
 
 /// 压缩会话时喂给模型的系统提示。
@@ -54,8 +54,16 @@ impl Agent {
             .push(COMPACTION_SYSTEM_PROMPT.to_string());
         prompt.messages = vec![ChatMessage::user_text(request_text)];
         // 压缩调用不提供工具、不把流式增量当作助手正文转发(它不是对话内容)。
-        match self.call_model(&prompt, &[], false, emit, cancel) {
-            CallResult::Done(output) => {
+        match call_model(
+            self.provider.as_ref(),
+            &prompt,
+            &[],
+            self.retry_policy,
+            false,
+            emit,
+            cancel,
+        ) {
+            ModelCallResult::Done(output) => {
                 let summary = output.message.text().trim().to_string();
                 self.usage_total.add(output.usage);
                 emit(AgentEvent::Usage {
@@ -92,11 +100,11 @@ impl Agent {
                 }
                 emit(AgentEvent::TurnFinished { cancelled: false });
             }
-            CallResult::Cancelled(_) => {
+            ModelCallResult::Cancelled(_) => {
                 emit(AgentEvent::Notice("压缩已取消,历史未变化".into()));
                 emit(AgentEvent::TurnFinished { cancelled: true });
             }
-            CallResult::Failed(failed) => {
+            ModelCallResult::Failed(failed) => {
                 emit(AgentEvent::Error(format!(
                     "压缩失败,历史未变化: {}",
                     failed.error

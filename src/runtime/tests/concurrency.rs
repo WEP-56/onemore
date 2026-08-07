@@ -275,7 +275,7 @@ fn tool_timeout_rewrites_obedient_abort_to_timeout() {
         root.join("data"),
     )
     .unwrap();
-    agent.config.tool_timeout = Some(Duration::from_millis(120));
+    agent.tool_timeout = Some(Duration::from_millis(120));
     agent.tools = ToolRegistry::new(vec![Box::new(SleepTool {
         name: "sleepy",
         millis: 10_000,

@@ -5,15 +5,17 @@
 //! 2. [`workspace`] + [`tools`] —— 工具系统
 //! 3. [`context`] —— 上下文组装
 //! 4. [`provider`] —— 两种 API 的流式适配
-//! 5. [`event`] + [`runtime`] —— Agent Loop、命令与 stateful harness
-//! 6. [`storage`] —— 全局配置路径与 SQLite 会话持久化
+//! 5. [`agent_loop`] + [`harness`] + [`runtime`] —— 核心循环、可注入状态与命令
+//! 6. [`storage`] —— 默认的数据路径、SQLite session 与 JSON 偏好适配器
 //! 7. [`tui`] —— 只是事件流的一个消费者
 //!
 //! Runtime 模块边界见 `docs/runtime-architecture.md`，其余设计文档见 `docs/`。
 
+pub mod agent_loop;
 pub mod config;
 pub mod context;
 pub mod event;
+pub mod harness;
 pub mod hooks;
 pub mod message;
 pub mod permission;

@@ -1,6 +1,9 @@
-//! # Agent Runtime:整个项目的心脏
+//! # Stateful Agent harness
 //!
-//! `Agent::run_turn` 就是教科书上的 Agent Loop:
+//! [`crate::agent_loop::run_agent_loop`] 是 provider-neutral 核心循环；这里的
+//! [`Agent`] 为 CLI 和默认嵌入入口装配事实日志、预算、planning、permissions、
+//! hooks、compaction 与 session commands。`Agent::run_turn` 只负责把这些能力
+//! 适配成 core callbacks。
 //!
 //! ```text
 //! 用户输入(作为 Message 事实落库)
@@ -11,7 +14,7 @@
 //!                  └─► 结果作为 Observation 事实落库 ──► 回到"投影"
 //! ```
 //!
-//! Runtime 对外只有两条通道(见 `event.rs`)+ 一个取消标志,
+//! Stateful Runtime 对外只有两条通道(见 `event.rs`)+ 一个取消标志,
 //! 由 [`spawn`] 起一个工作线程承载;`--once` 模式则直接在当前线程
 //! 调 [`Agent::handle_command`]——同一份循环,两种前端。
 //!
@@ -30,17 +33,16 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{ActiveModelSelection, Config, ProviderCatalogEntry};
+use crate::config::{ActiveModelSelection, ProviderCatalogEntry};
 use crate::context::budget::ContextBudget;
 use crate::context::ContextProvider;
 use crate::event::{AgentCommand, AgentEvent};
+use crate::harness::{ModelPreferences, ModelRegistry, SessionBackend};
 use crate::hooks::HookRegistry;
 use crate::message::Usage;
 use crate::permission::{ApprovalResponse, PermissionManager};
 use crate::provider::Provider;
 use crate::session::SessionEntry;
-use crate::skills::SkillCatalog;
-use crate::storage::{SessionManager, WorkspacePreferences};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -50,70 +52,8 @@ mod commands;
 mod compaction;
 mod tool_execution;
 
+pub use crate::agent_loop::RetryPolicy;
 pub use builder::{AgentBuilder, ProviderFactory};
-
-/// 请求级重试策略。只覆盖"尚未产生任何流事件"的失败(重试幂等由调用方保证);
-/// 全部决策收敛在 [`RetryPolicy::delay_for`] 这一个纯函数里,便于确定性测试。
-#[derive(Debug, Clone, Copy)]
-pub struct RetryPolicy {
-    /// 最大尝试次数(含首次)。
-    pub max_attempts: u32,
-    /// 指数退避基数(第 1 次失败后等待 base,之后翻倍)。
-    pub base_delay: Duration,
-    /// 退避上限(含 jitter 之后)。
-    pub max_delay: Duration,
-    /// 服务器 Retry-After 超过它就放弃重试:不为一个请求无限期挂住 Runtime。
-    pub max_retry_after: Duration,
-    /// jitter 种子。相同种子产生相同序列,测试可注入固定值。
-    pub jitter_seed: u64,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(30),
-            max_retry_after: Duration::from_secs(60),
-            jitter_seed: 0x9E37_79B9_7F4A_7C15,
-        }
-    }
-}
-
-impl RetryPolicy {
-    /// `attempt` 是刚失败的第几次尝试(从 1 开始)。返回 None = 不再重试。
-    /// 服务器给出的 Retry-After 优先且不加 jitter;超过上限直接放弃。
-    pub fn delay_for(&self, attempt: u32, retry_after: Option<Duration>) -> Option<Duration> {
-        if attempt >= self.max_attempts {
-            return None;
-        }
-        if let Some(server_wait) = retry_after {
-            if server_wait > self.max_retry_after {
-                return None;
-            }
-            return Some(server_wait);
-        }
-        let exponent = attempt.saturating_sub(1).min(20);
-        let backoff = self
-            .base_delay
-            .saturating_mul(1u32 << exponent)
-            .min(self.max_delay);
-        // 加 [0,25%) 的确定性 jitter,避免多客户端整点齐射;最终仍受 max_delay 约束。
-        let jitter = backoff.mul_f64(self.jitter_fraction(attempt));
-        Some((backoff + jitter).min(self.max_delay))
-    }
-
-    /// splitmix64 变体:同 (seed, attempt) 恒定,取值 [0, 0.25)。
-    fn jitter_fraction(&self, attempt: u32) -> f64 {
-        let mut x = self
-            .jitter_seed
-            .wrapping_add((attempt as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        x ^= x >> 33;
-        x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-        x ^= x >> 33;
-        (x % 1000) as f64 / 4000.0
-    }
-}
 
 pub struct Agent {
     workspace: Workspace,
@@ -127,15 +67,15 @@ pub struct Agent {
     active_selection: ActiveModelSelection,
     budget: ContextBudget,
     retry_policy: RetryPolicy,
-    config: Config,
+    models: Box<dyn ModelRegistry>,
+    max_turns: u32,
+    tool_timeout: Option<Duration>,
     usage_total: Usage,
-    sessions: SessionManager,
-    workspace_preferences: WorkspacePreferences,
+    sessions: Box<dyn SessionBackend>,
+    model_preferences: Box<dyn ModelPreferences>,
     permissions: PermissionManager,
     hooks: HookRegistry,
-    skills: std::sync::Arc<SkillCatalog>,
-    skill_warnings: Vec<String>,
-    skills_announced: bool,
+    startup_events: std::collections::VecDeque<AgentEvent>,
     approval_rx: Option<Receiver<ApprovalResponse>>,
     /// 活动运行中收到、需要等本轮结束再执行的命令(/clear、/provider 等)。
     deferred: std::collections::VecDeque<AgentCommand>,
@@ -169,8 +109,8 @@ pub struct RuntimeHandle {
 pub fn spawn(agent: Agent) -> RuntimeHandle {
     let provider_label = agent.provider_label();
     let active_selection = agent.active_selection.clone();
-    let provider_catalog = agent.config.provider_catalog();
-    let reasoning_preferences = agent.workspace_preferences.reasoning_efforts();
+    let provider_catalog = agent.models.provider_catalog();
+    let reasoning_preferences = agent.model_preferences.reasoning_efforts();
     let session_id = agent.session_id().to_string();
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AgentCommand>();
     let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalResponse>();
@@ -187,7 +127,7 @@ pub fn spawn(agent: Agent) -> RuntimeHandle {
                 // 前端先退出时 send 会失败,忽略即可(线程随后收到 Shutdown 或通道关闭)
                 let _ = evt_tx.send(e);
             };
-            agent.emit_skill_discovery(&mut emit);
+            agent.emit_startup_events(&mut emit);
             loop {
                 // 活动运行中延迟的命令(/clear、/provider、Shutdown…)优先于新命令。
                 let cmd = match agent.take_deferred() {

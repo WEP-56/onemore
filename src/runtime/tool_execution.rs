@@ -1,22 +1,39 @@
 //! Tool preflight, permission checks, scheduling, and result settlement.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::event::AgentEvent;
-use crate::permission::{ApprovalDecision, ApprovalRequest, ApprovalScope, PermissionDecision};
+use crate::hooks::HookRegistry;
+use crate::permission::{
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, ApprovalScope, PermissionDecision,
+    PermissionManager,
+};
 use crate::plan::{reduce_plan, validate_transition as validate_plan_transition, PlanSnapshot};
+use crate::session::SessionEntry;
 use crate::tools::{
     normalize_outcome, PreparedToolCall, ToolContext, ToolEffect, ToolError, ToolErrorCode,
-    ToolOutcome, ToolOutput,
+    ToolOutcome, ToolOutput, ToolRegistry,
 };
 use crate::util;
+use crate::workspace::Workspace;
 
 use super::agent_loop::emit_hook_warnings;
-use super::Agent;
 
-impl Agent {
+pub(super) struct DefaultToolExecutor<'a> {
+    pub(super) workspace: &'a Workspace,
+    pub(super) tools: &'a ToolRegistry,
+    pub(super) entries: &'a [SessionEntry],
+    pub(super) permissions: &'a mut PermissionManager,
+    pub(super) hooks: &'a mut HookRegistry,
+    pub(super) approval_rx: Option<&'a Receiver<ApprovalResponse>>,
+    pub(super) session_id: &'a str,
+    pub(super) tool_timeout: Option<Duration>,
+}
+
+impl DefaultToolExecutor<'_> {
     /// 单个调用的 preflight:兼容转换 → schema 校验 → hard deny → pre hook
     /// → 权限复核(Ask 在此阻塞等待审批)。按源顺序在 Runtime 线程执行,
     /// 任何失败都在这里定案为错误结果,绝不进入执行阶段。
@@ -53,16 +70,14 @@ impl Agent {
 
         // Hook 之前先执行一次完整策略检查，hard deny 在这里不可逆地终止调用。
         if let PermissionDecision::Deny { reason } =
-            self.permissions.evaluate(&prepared, &self.workspace)
+            self.permissions.evaluate(&prepared, self.workspace)
         {
             return settled(permission_denied(reason));
         }
 
-        let pre = self.hooks.run_pre_tool(
-            &prepared.spec,
-            &prepared.arguments,
-            self.sessions.current_id(),
-        );
+        let pre = self
+            .hooks
+            .run_pre_tool(&prepared.spec, &prepared.arguments, self.session_id);
         emit_hook_warnings(pre.warnings, emit);
         if let Some(reason) = pre.block {
             return settled(ToolOutcome::failure(ToolError::new(
@@ -85,7 +100,7 @@ impl Agent {
             };
         }
 
-        match self.permissions.evaluate(&prepared, &self.workspace) {
+        match self.permissions.evaluate(&prepared, self.workspace) {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {
                 return settled(permission_denied(reason));
@@ -147,12 +162,12 @@ impl Agent {
         } else {
             1
         };
-        let timeout = self.config.tool_timeout;
-        let session_id = self.sessions.current_id().to_string();
-        let mut batch_plan = reduce_plan(&self.entries).snapshot;
+        let timeout = self.tool_timeout;
+        let session_id = self.session_id.to_string();
+        let mut batch_plan = reduce_plan(self.entries).snapshot;
         // 字段级拆分借用:worker 只读 tools/workspace,协调侧独占 hooks。
-        let tools = &self.tools;
-        let workspace = &self.workspace;
+        let tools = self.tools;
+        let workspace = self.workspace;
         let hooks = &mut self.hooks;
 
         enum WorkerMsg {
@@ -342,7 +357,7 @@ impl Agent {
         };
         emit(AgentEvent::PermissionRequested { request });
 
-        let Some(receiver) = self.approval_rx.as_ref() else {
+        let Some(receiver) = self.approval_rx else {
             emit(AgentEvent::PermissionResolved {
                 request_id,
                 allowed: false,

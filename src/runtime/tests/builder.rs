@@ -78,6 +78,11 @@ fn builder_injected_components_are_active() {
     let root = temp_root("builder-components");
     let workspace_root = root.join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
+    std::fs::write(
+        workspace_root.join("AGENTS.md"),
+        "this must not leak through an exact context replacement",
+    )
+    .unwrap();
     let hook_calls = Arc::new(AtomicUsize::new(0));
     let retry_policy = RetryPolicy {
         max_attempts: 7,
@@ -140,6 +145,134 @@ fn builder_injected_components_are_active() {
     assert_eq!(hook_calls.load(Ordering::Relaxed), 1);
     assert_eq!(agent.retry_policy.max_attempts, 7);
     assert_eq!(agent.retry_policy.jitter_seed, 44);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_context_freezes_root_agents_in_pi_style_order() {
+    let root = temp_root("agents-context");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(workspace_root.join(".onemore/skills/demo")).unwrap();
+    std::fs::write(
+        workspace_root.join("AGENTS.md"),
+        "Keep production paths unique.",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace_root.join(".onemore/skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\nbody",
+    )
+    .unwrap();
+
+    let agent = Agent::builder(
+        multi_model_config(&root),
+        Workspace::new(workspace_root.clone()),
+    )
+    .data_dir(root.join("data"))
+    .system_prompt(Some("host-owned base prompt".into()))
+    .build()
+    .unwrap();
+    let sections = agent.build_system_prompt().system_sections;
+
+    assert_eq!(sections.len(), 4);
+    assert_eq!(sections[0], "host-owned base prompt");
+    assert!(sections[1].starts_with("<project_context>"));
+    assert!(sections[1].contains("Keep production paths unique."));
+    assert!(sections[1].contains(&workspace_root.join("AGENTS.md").display().to_string()));
+    assert!(sections[2].starts_with("<available_skills>"));
+    assert!(sections[3].starts_with("Environment:\n- Working directory:"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_root_agents_is_a_non_fatal_startup_notice() {
+    let root = temp_root("agents-warning");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    std::fs::write(workspace_root.join("AGENTS.md"), [0xff, 0xfe]).unwrap();
+    let mut agent = Agent::builder(multi_model_config(&root), Workspace::new(workspace_root))
+        .data_dir(root.join("data"))
+        .build()
+        .unwrap();
+
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::ListSessions,
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::Notice(message)) if message.contains("AGENTS.md")
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn direct_in_memory_builder_needs_no_config_state_or_skills_directories() {
+    let root = temp_root("in-memory-builder");
+    let workspace_root = root.join("workspace");
+    let state_root = root.join("must-not-exist");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let mut agent = Agent::builder_from_provider(
+        ProviderSettings {
+            name: "embedded".into(),
+            api: ApiKind::Responses,
+            profile: ProviderProfile::OpenAiResponses,
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: String::new(),
+            model: "scripted".into(),
+            max_tokens: Some(4096),
+            context_window: Some(32_000),
+            selected_effort: "medium".into(),
+            reasoning_effort: ReasoningEffortPolicy::Omit,
+        },
+        Workspace::new(workspace_root),
+    )
+    .data_dir(state_root.clone())
+    .in_memory()
+    .provider_factory(|_| {
+        Box::new(ScriptedProvider::new(vec![ScriptStep::Output(output(
+            ChatMessage::empty_assistant(),
+            StopReason::EndTurn,
+        ))]))
+    })
+    .build()
+    .unwrap();
+
+    assert!(!root.join("config.toml").exists());
+    assert!(!state_root.exists());
+    assert!(!agent
+        .tools
+        .specs()
+        .iter()
+        .any(|spec| spec.name == "load_skill"));
+    assert!(!agent
+        .build_system_prompt()
+        .system_text()
+        .contains("load_skill"));
+
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::UserInput("hello".into()),
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+    agent.handle_command(
+        AgentCommand::ListSessions,
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::SkillsDiscovered { .. })));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SessionsListed { sessions, .. }
+            if sessions.len() == 1 && sessions[0].message_count == 2
+    )));
+    assert!(!state_root.exists());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -234,7 +367,7 @@ fn model_selection_updates_budget_records_one_fact_and_persists_effort() {
     assert_eq!(restarted.active_selection.model, "small");
     assert_eq!(restarted.active_selection.effort, DEFAULT_REASONING_EFFORT);
     assert_eq!(
-        restarted.workspace_preferences.effort("mock", "large"),
+        restarted.model_preferences.effort("mock", "large"),
         Some("high")
     );
     let _ = std::fs::remove_dir_all(root);

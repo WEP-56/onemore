@@ -35,9 +35,7 @@ cargo run
 切换后仍会走宿主实现。
 
 ```rust
-use std::path::PathBuf;
-
-use onemore::config::{Config, ProviderSettings};
+use onemore::config::ProviderSettings;
 use onemore::context::ContextProvider;
 use onemore::provider::Provider;
 use onemore::runtime::{Agent, RetryPolicy};
@@ -45,15 +43,14 @@ use onemore::tools::ToolRegistry;
 use onemore::workspace::Workspace;
 
 fn embedded_agent(
-    config: Config,
+    settings: ProviderSettings,
     workspace: Workspace,
-    data_dir: PathBuf,
     provider_factory: impl Fn(ProviderSettings) -> Box<dyn Provider> + Send + Sync + 'static,
     tools: ToolRegistry,
     context: Vec<Box<dyn ContextProvider>>,
 ) -> anyhow::Result<Agent> {
-    Agent::builder(config, workspace)
-        .data_dir(data_dir)
+    Agent::builder_from_provider(settings, workspace)
+        .in_memory()
         .provider_factory(provider_factory)
         .tools(tools)
         .context_providers(context)
@@ -62,8 +59,43 @@ fn embedded_agent(
 }
 ```
 
-当前这是 stateful harness 的组合边界，不是最终的纯 agent loop：SQLite session、workspace
-偏好和 skills discovery 仍由 builder 建立。具体模块职责与剩余边界见
+`in_memory()` 不创建 SQLite、workspace 偏好或 skills 目录，也不会把 `load_skill` 及其
+提示词装进 Agent。宿主还可以分别注入 `ModelRegistry`、`SessionBackend`、
+`ModelPreferences` 或冻结的 `SkillCatalog`。
+
+不需要 Onemore stateful harness 的宿主可以直接调用同一条生产 core loop：
+
+```rust
+use std::sync::atomic::AtomicBool;
+
+use onemore::agent_loop::{
+    run_agent_loop, AgentLoopCallbacks, AgentLoopHost, AgentLoopOutcome,
+};
+use onemore::event::AgentEvent;
+use onemore::message::ChatMessage;
+use onemore::provider::Provider;
+use onemore::tools::ToolSpec;
+
+fn run_core(
+    model: &dyn Provider,
+    messages: Vec<ChatMessage>,
+    tools: &[ToolSpec],
+    host: &mut dyn AgentLoopHost,
+) -> AgentLoopOutcome {
+    let cancel = AtomicBool::new(false);
+    let mut emit = |_event: AgentEvent| {};
+    run_agent_loop(
+        model,
+        messages,
+        tools,
+        AgentLoopCallbacks::new(host, &mut emit, &cancel),
+    )
+}
+```
+
+`AgentLoopHost` callbacks 决定 prompt 变换、工具执行、提交、steering/follow-up 和收尾；
+默认 `Agent` adapter 才理解 facts、planning reminder、permissions/hooks 与 session。
+compaction 和 session commands 不属于 core loop。具体边界见
 [Runtime 结构与弱 Harness 边界](docs/runtime-architecture.md)。
 
 TUI 内常用操作:
@@ -184,6 +216,16 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
   只包含稳定 metadata catalog，正文按需由模型调用 `load_skill({"name": "..."})`。
 - 技能正文和它引导的工具调用仍受原有权限、审批和工具能力策略控制；文件变化会被
   识别为 stale catalog，下一次启动才重新发现。
+
+### 9. Project instructions
+
+- 默认 harness 在启动时读取 workspace 根目录的 `AGENTS.md`；缺失或空文件不增加
+  prompt，读取失败只产生一次非致命提示。
+- 文件路径与正文使用 `<project_context>` / `<project_instructions path="...">` 边界
+  注入 system prompt。快照在 Agent 生命周期内冻结，修改后需要重新启动 Agent 才会生效。
+- 第一版不扫描 workspace 外的祖先目录，也不加载嵌套目录、`CLAUDE.md`、override 或
+  全局指令文件。宿主通过 `context_providers(...)` 完整替换默认 context 时不会扫描
+  `AGENTS.md`。
 
 ### 尚未实现
 

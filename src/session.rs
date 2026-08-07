@@ -163,6 +163,16 @@ pub struct SessionSnapshot {
     pub usage: Usage,
 }
 
+/// Frontend-facing metadata for one restorable session.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    /// Number of message facts, excluding UI and control facts.
+    pub message_count: usize,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelProjection {
     pub messages: Vec<ChatMessage>,

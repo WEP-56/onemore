@@ -16,9 +16,8 @@
 use crate::message::CacheUsage;
 use crate::permission::ApprovalRequest;
 use crate::plan::PlanItem;
-use crate::session::SessionEntry;
+use crate::session::{SessionEntry, SessionSummary};
 use crate::skills::SkillMetadata;
-use crate::storage::SessionSummary;
 use crate::tools::{ToolError, ToolOutput};
 
 /// 前端 → Runtime。

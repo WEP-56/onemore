@@ -5,7 +5,8 @@
 //!
 //! 1. 可插拔的 [`ContextProvider`] 列表:每轮请求前,Runtime 依次调用
 //!    每个 provider 的 `contribute()`,把系统提示片段注入 [`PromptContext`]。
-//!    默认装配 [`instructions::Instructions`] 与 [`workspace_info::WorkspaceInfo`]。
+//!    默认依次装配 [`instructions::Instructions`]、根目录 `AGENTS.md`、可选 skills
+//!    catalog 与 [`workspace_info::WorkspaceInfo`]。
 //! 2. 消息视图来自 `session::project_model_messages` 的**单向投影**:
 //!    事实日志(SessionEntry)→ 模型消息,再经 [`budget`] 做 token 预算
 //!    (估算 → 折叠旧 ToolResult → 仍超预算就明确拒绝)。
@@ -19,6 +20,7 @@
 
 pub mod budget;
 pub mod instructions;
+pub mod project_instructions;
 pub mod skills;
 pub mod workspace_info;
 
