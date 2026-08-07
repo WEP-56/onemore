@@ -19,8 +19,8 @@ use crate::tools::{
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 enum ScriptStep {
     Output(crate::provider::TurnOutput),
@@ -319,3 +319,4 @@ mod history;
 mod permissions;
 mod planning;
 mod queues;
+mod session_runtime;

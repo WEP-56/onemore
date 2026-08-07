@@ -19,13 +19,20 @@ src/harness.rs
 src/harness/
   model.rs           固定单模型 registry
   memory.rs          无文件系统的 session/preferences 实现
+src/sdk.rs + src/sdk/
+  公开 SessionController、SessionEvents、snapshot/event view 和错误码
+src/rpc.rs + src/rpc/
+  严格 JSONL v1 framing、wire DTO 和 SessionController adapter
 src/runtime.rs
-  公开 Agent / RuntimeHandle，并承载 stateful 线程宿主
+  公开 Agent，并承载唯一 stateful 线程宿主
 src/runtime/
   agent_loop.rs       AgentLoopHost adapter：facts、预算、planning、队列、原子提交
   builder.rs          CLI 默认装配和宿主组件注入
   commands.rs         命令分发、模型切换、session 管理与通用事实提交
   compaction.rs       手动/自动共用的纯文本摘要调用与原子 Compaction 提交
+  inbox.rs            command ID、一次性 admission ack 与 direct harness 适配
+  session_runtime.rs  有界 command/event worker、phase、终态和 settled
+  session_events.rs   AgentEvent 到稳定 SDK event/snapshot 的清洗投影
   tool_execution.rs   默认 ToolExecutor：schema、hooks、permissions、并发、取消与超时
   tests.rs            跨域测试夹具
   tests/              按 builder / compaction / permissions / planning / history / queues / concurrency 分组
@@ -100,3 +107,21 @@ usage baseline；model change、compaction 和损坏历史修复的语义仍由 
 安全切分的 retained tail 和后续 facts 重新投影，失败或取消不会追加 Compaction 事实。
 `Agent::new(...)`、`Agent::builder_from_provider(...).in_memory()` 与 CLI 线程宿主最终都从
 `Agent::run_turn` 调用公开 `run_agent_loop`，不存在兼容用的第二套 loop。
+
+## SessionController 与前端
+
+`sdk::spawn_session(agent)` 是 TUI、`--once`、Rust 嵌入和 JSONL RPC 的唯一 stateful
+生产入口。命令通道和事件通道都有固定容量；mutation 携带 Runtime 生成的 `command_id` 和
+一次性 admission ack。成功 receipt 只表示已接纳，完成状态由 `CommandFinished` 报告；
+Runtime 发布最终权威 snapshot 后才发送一次 `Settled`。`wait_until_settled` 使用共享状态和
+Condvar，不会与前端争抢事件流。
+
+活动运行中，`prompt` 在 runtime checkpoint 明确返回 `busy`；`steer` 与 `follow_up` 分别进入
+可观察的队列并保留 command ID。排队输入在提交为用户事实后从 snapshot 队列移除，取消时每项
+都会得到 `cancelled` 终态。审批继续走独立响应通道，并在共享状态中原子占用 request ID，
+重复或过期响应不会进入工具执行器。
+
+SDK view 只从 committed facts 和 runtime live state 单向投影。它不序列化 `AgentCommand`、
+`AgentEvent` 或 `SessionEntryPayload`，也不暴露 provider raw reasoning、原始工具参数、任意
+tool details、system/compaction prompt 或存储位置。RPC 只是这个 SDK 的严格 JSONL adapter，
+没有第二套命令执行实现。

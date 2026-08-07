@@ -14,9 +14,8 @@
 //!                  └─► 结果作为 Observation 事实落库 ──► 回到"投影"
 //! ```
 //!
-//! Stateful Runtime 对外只有两条通道(见 `event.rs`)+ 一个取消标志,
-//! 由 [`spawn`] 起一个工作线程承载;`--once` 模式则直接在当前线程
-//! 调 [`Agent::handle_command`]——同一份循环,两种前端。
+//! [`crate::sdk::spawn_session`] 用稳定 controller 和有界事件流承载线程宿主；
+//! TUI、`--once` 和 RPC adapter 都通过这一个入口驱动同一份循环。
 //!
 //! 阶段 4 之后,这里遵守"事实先行"的持久化纪律:
 //! - **事实日志是唯一权威**:Agent 只持有 `Vec<SessionEntry>` 内存镜像,
@@ -28,13 +27,11 @@
 //!   本轮立即终止并报错——宁可少跑一轮,不让内存与磁盘历史分叉。
 //! - **重试要幂等**:只有"一个字都还没吐出来"的失败才自动重试。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use crate::compaction::CompactionSettings;
-use crate::config::{ActiveModelSelection, ProviderCatalogEntry};
+use crate::config::ActiveModelSelection;
 use crate::context::budget::ContextBudget;
 use crate::context::ContextProvider;
 use crate::event::{AgentCommand, AgentEvent};
@@ -51,11 +48,15 @@ mod agent_loop;
 mod builder;
 mod commands;
 mod compaction;
+pub(crate) mod inbox;
+mod session_events;
+mod session_runtime;
 mod tool_execution;
 
 pub use crate::agent_loop::RetryPolicy;
 pub use builder::{AgentBuilder, ProviderFactory};
 use compaction::CompactionRuntime;
+pub use session_runtime::spawn_session;
 
 pub struct Agent {
     workspace: Workspace,
@@ -89,76 +90,6 @@ fn budget_from_settings(settings: &crate::config::ProviderSettings) -> ContextBu
         context_window: settings.context_window,
         // 输出预留:显式 max_tokens,否则一个保守默认。
         reserve_output: settings.max_tokens.unwrap_or(8192),
-    }
-}
-
-/// 前端持有的 Runtime 句柄。
-pub struct RuntimeHandle {
-    pub commands: Sender<AgentCommand>,
-    pub approvals: Sender<ApprovalResponse>,
-    pub events: Receiver<AgentEvent>,
-    /// 置 true 请求取消当前轮;Runtime 会在收尾后自行复位。
-    pub cancel: Arc<AtomicBool>,
-    pub provider_label: String,
-    pub active_selection: ActiveModelSelection,
-    pub provider_catalog: Vec<ProviderCatalogEntry>,
-    pub reasoning_preferences:
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    pub session_id: String,
-}
-
-/// 把 Agent 装进工作线程,返回通道句柄。TUI 前端用这个;
-/// headless 前端不需要线程,直接调 `Agent::handle_command`。
-pub fn spawn(agent: Agent) -> RuntimeHandle {
-    let provider_label = agent.provider_label();
-    let active_selection = agent.active_selection.clone();
-    let provider_catalog = agent.models.provider_catalog();
-    let reasoning_preferences = agent.model_preferences.reasoning_efforts();
-    let session_id = agent.session_id().to_string();
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AgentCommand>();
-    let (approval_tx, approval_rx) = std::sync::mpsc::channel::<ApprovalResponse>();
-    let (evt_tx, evt_rx) = std::sync::mpsc::channel::<AgentEvent>();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_worker = cancel.clone();
-
-    std::thread::Builder::new()
-        .name("agent-runtime".into())
-        .spawn(move || {
-            let mut agent = agent;
-            agent.approval_rx = Some(approval_rx);
-            let mut emit = |e: AgentEvent| {
-                // 前端先退出时 send 会失败,忽略即可(线程随后收到 Shutdown 或通道关闭)
-                let _ = evt_tx.send(e);
-            };
-            agent.emit_startup_events(&mut emit);
-            loop {
-                // 活动运行中延迟的命令(/clear、/provider、Shutdown…)优先于新命令。
-                let cmd = match agent.take_deferred() {
-                    Some(cmd) => cmd,
-                    None => match cmd_rx.recv() {
-                        Ok(cmd) => cmd,
-                        Err(_) => break,
-                    },
-                };
-                // 新命令开始前复位取消标志(上一轮的取消不该波及这一轮)
-                cancel_worker.store(false, Ordering::Relaxed);
-                if !agent.handle_command_with_inbox(cmd, &mut emit, &cancel_worker, Some(&cmd_rx)) {
-                    break;
-                }
-            }
-        })
-        .expect("无法创建 runtime 线程");
-
-    RuntimeHandle {
-        commands: cmd_tx,
-        approvals: approval_tx,
-        events: evt_rx,
-        cancel,
-        provider_label,
-        active_selection,
-        provider_catalog,
-        reasoning_preferences,
-        session_id,
     }
 }
 

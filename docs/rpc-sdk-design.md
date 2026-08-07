@@ -1,6 +1,6 @@
 # OneMore SDK 与 JSONL RPC 设计
 
-状态：施工规格草案
+状态：RPC/SDK v1 已实现，剩余可靠性覆盖见第 8 节
 更新时间：2026-08-07
 
 本文定义 OneMore 下一阶段的本地 SDK 边界和首版 JSONL RPC 协议。目标不是复制 Pi 的
@@ -55,9 +55,9 @@ Rust embedder         TUI / --once              JSONL client
 4. SDK 公共 view types 与内部 domain types 分离，由一个 adapter 单向转换。
 5. snapshot 只能从已提交事实和 Runtime 当前权威状态生成，不能包含前端乐观状态。
 
-## 3. 本地 SDK 目标接口
+## 3. 本地 SDK 接口
 
-以下是目标接口草图，尚未实现。首版保持同步、阻塞式 Rust API，与当前线程模型一致；
+以下接口已在 `src/sdk.rs` 与 `src/sdk/` 实现。首版保持同步、阻塞式 Rust API，与当前线程模型一致；
 暂不为此引入 async runtime。
 
 ```rust
@@ -349,6 +349,7 @@ ProgressEvent
 - 只以 LF (`0x0A`) 分帧；字符串里的 `U+2028`、`U+2029` 不是分隔符。
 - 接收时可容忍 LF 前一个 CR，但发送始终只写 LF。
 - 首版设定固定最大行长；超过限制返回 protocol error 后关闭连接。
+- request ID 最多 256 UTF-8 bytes；单连接最多使用 65,536 个不同 ID，达到上限后安全关闭。
 - stdout 只允许协议帧；日志、诊断和 panic 信息走 stderr。
 - 每个 object 都严格拒绝未知字段，Rust DTO 使用 `#[serde(deny_unknown_fields)]`。
 - malformed JSON、未知 tag、重复 request ID 都是明确协议错误，不能静默忽略。
@@ -379,6 +380,10 @@ client 的第一帧必须是：
 ```
 
 hello 失败后进程退出，不尝试兼容或降级。
+
+v1 采用精确版本协商：同一 `version` 内只允许保持现有字段语义的实现修复；任何新增必填字段、
+tag 改名或语义不兼容变化都必须提升协议版本。服务端不猜测、不降级，也不为实现前的实验报文
+保留兼容分支。
 
 ### 6.3 Request / Response envelope
 
@@ -442,7 +447,7 @@ query 命令在 response 的 `result` 中返回数据，不产生 `command_id`�
 
 ## 7. 使用示例
 
-以下示例描述目标接口，当前尚不能运行。
+以下示例使用当前 v1 接口。
 
 ### 7.1 Rust 嵌入
 
@@ -450,7 +455,7 @@ query 命令在 response 的 `result` 中返回数据，不产生 `command_id`�
 use std::time::Duration;
 
 use onemore::runtime::Agent;
-use onemore::sdk::{spawn_session, SessionEvent};
+use onemore::sdk::{spawn_session, SessionEvent, SessionPhase};
 
 let agent = Agent::builder_from_provider(settings, workspace)
     .in_memory()
@@ -462,7 +467,7 @@ let receipt = session.controller.prompt("检查 src/runtime.rs")?;
 
 while let Ok(event) = session.events.recv() {
     match event {
-        SessionEvent::Progress { progress } => render(progress),
+        SessionEvent::Progress { progress } => eprintln!("{progress:?}"),
         SessionEvent::CommandFinished { command_id, status, .. }
             if command_id == receipt.command_id =>
         {
@@ -541,63 +546,63 @@ server：
 
 - [x] 区分 Pi 成熟 coding-agent、实验 protocol/server 和未完成 Harness v2。
 - [x] 定义本地 SDK、snapshot、event、RPC envelope 和首版命令清单。
-- [ ] 评审本文件并冻结 v1 命名；实现开始后协议变更必须同步更新示例和测试。
+- [x] 评审本文件并冻结 v1 命名；实现开始后协议变更必须同步更新示例和测试。
 
 ### P1：稳定 view types 与投影
 
-- [ ] 新建职责独立的 SDK 模块，定义 `SessionSnapshot`、`SessionEvent`、view types 和错误码。
-- [ ] 从 `Agent` 当前 facts、plan、usage、selection 和 queues 生成单向 snapshot projection。
-- [ ] 确保 projection 不暴露 thinking raw、provider payload、工具原始参数或任意 details。
-- [ ] 为 snapshot revision、phase 转换和 transcript tool 配对增加单元测试。
-- [ ] 不直接给 `AgentCommand`、`AgentEvent` 或 `SessionEntryPayload` 增加 wire serde 语义。
+- [x] 新建职责独立的 SDK 模块，定义 `SessionSnapshot`、`SessionEvent`、view types 和错误码。
+- [x] 从 `Agent` 当前 facts、plan、usage、selection 和 queues 生成单向 snapshot projection。
+- [x] 确保 projection 不暴露 thinking raw、provider payload、工具原始参数或任意 details。
+- [x] 为 snapshot revision、phase 转换和 transcript tool 配对增加单元测试。
+- [x] 不直接给 `AgentCommand`、`AgentEvent` 或 `SessionEntryPayload` 增加 wire serde 语义。
 
 ### P2：SessionController 与 admission
 
-- [ ] 用内部 command envelope 替换裸 `Sender<AgentCommand>`，加入 `command_id` 和一次性 ack。
-- [ ] 实现 `prompt/steer/follow_up/abort/compact/set_model` 的明确 admission 规则。
-- [ ] query 必须由 Runtime 线程返回当前值，移除 `RuntimeHandle` 中会变旧的启动元数据副本。
-- [ ] 记录已接纳队列项的 command ID；取消时不得静默丢弃。
-- [ ] 实现 phase 状态机、`command_finished` 和严格一次的 `settled`。
-- [ ] 实现不消费 event stream 的 `wait_until_settled`。
-- [ ] 保持 approval 独立响应路径，过期/重复响应返回结构化错误。
+- [x] 用内部 command envelope 替换裸 `Sender<AgentCommand>`，加入 `command_id` 和一次性 ack。
+- [x] 实现 `prompt/steer/follow_up/abort/compact/set_model` 的明确 admission 规则。
+- [x] query 必须由 Runtime 线程返回当前值，移除 `RuntimeHandle` 中会变旧的启动元数据副本。
+- [x] 记录已接纳队列项的 command ID；取消时不得静默丢弃。
+- [x] 实现 phase 状态机、`command_finished` 和严格一次的 `settled`。
+- [x] 实现不消费 event stream 的 `wait_until_settled`。
+- [x] 保持 approval 独立响应路径，过期/重复响应返回结构化错误。
 
 ### P3：现有前端迁移
 
-- [ ] TUI 改用 `SessionController + SessionEvents`。
-- [ ] `--once` 改用相同 admission 与 settled 语义。
-- [ ] 删除旧裸 sender/receiver 的公开入口，不留兼容的第二套 runtime。
-- [ ] 验证 CLI 的 clear、session load、model selection、steering 和 approval 行为不退化。
+- [x] TUI 改用 `SessionController + SessionEvents`。
+- [x] `--once` 改用相同 admission 与 settled 语义。
+- [x] 删除旧裸 sender/receiver 的公开入口，不留兼容的第二套 runtime。
+- [x] 验证 CLI 的 clear、session load、model selection、steering 和 approval 行为不退化。
 
 ### P4：JSONL RPC v1
 
-- [ ] 增加独立 wire DTO；所有 object 使用严格未知字段拒绝。
-- [ ] 实现 LF-only、增量 UTF-8 JSONL reader，不使用宽松的按 Unicode 行分隔逻辑。
-- [ ] 实现最大帧限制、hello/version、request/response/event envelope。
-- [ ] 实现 v1 命令 adapter，所有 mutation 只调用 SessionController。
-- [ ] 增加 CLI `--rpc` 模式；stdout 只输出协议，stderr 输出诊断。
-- [ ] malformed JSON、未知 command、重复 ID 和版本不匹配均返回稳定错误。
+- [x] 增加独立 wire DTO；所有 object 使用严格未知字段拒绝。
+- [x] 实现 LF-only、增量 UTF-8 JSONL reader，不使用宽松的按 Unicode 行分隔逻辑。
+- [x] 实现最大帧限制、hello/version、request/response/event envelope。
+- [x] 实现 v1 命令 adapter，所有 mutation 只调用 SessionController。
+- [x] 增加 CLI `--rpc` 模式；stdout 只输出协议，stderr 输出诊断。
+- [x] malformed JSON、未知 command、重复 ID 和版本不匹配均返回稳定错误。
 
 ### P5：可靠性与审批
 
 - [ ] Runtime 到 writer 使用有界队列并覆盖慢 reader 背压测试。
-- [ ] broken pipe、stdin EOF 和 client 退出触发 abort、审批 deny 与安全 shutdown。
+- [x] broken pipe、stdin EOF 和 client 退出触发 abort、审批 deny 与安全 shutdown。
 - [ ] 审批 request/response 覆盖 allow once、allow session、deny、过期、重复和断连。
-- [ ] snapshot 与 progress 交错时，最终 snapshot 可完整纠正客户端组装状态。
-- [ ] accepted 输入必须逐个获得 succeeded/failed/cancelled 终态。
-- [ ] 保持并回归 ToolUse/ToolResult 配对、原子工具批提交和 append-only 事实日志。
+- [x] snapshot 与 progress 交错时，最终 snapshot 可完整纠正客户端组装状态。
+- [x] accepted 输入必须逐个获得 succeeded/failed/cancelled 终态。
+- [x] 保持并回归 ToolUse/ToolResult 配对、原子工具批提交和 append-only 事实日志。
 
 ### P6：测试与文档
 
-- [ ] 增加 SDK 单元测试和 runtime 并发/队列测试。
+- [x] 增加 SDK 单元测试和 runtime 并发/队列测试。
 - [ ] 增加真实子进程 JSONL wire tests，覆盖 prompt、steer、abort、compact、model 和 session。
 - [ ] 增加慢 reader、断连、半帧 EOF、超长帧、未知字段和 stdout 污染测试。
-- [ ] 增加最小 Rust SDK example 和非 Rust JSONL client example。
-- [ ] 更新 README、runtime architecture 和 handoff；公开协议版本与兼容策略。
-- [ ] 运行完整 `cargo test --locked`。
-- [ ] 运行 `cargo clippy --locked --all-targets -- -D warnings`。
-- [ ] 运行 `cargo fmt --all --check`。
-- [ ] 运行 `$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps`。
-- [ ] 运行 `git diff --check`。
+- [x] 增加最小 Rust SDK example 和非 Rust JSONL client example。
+- [x] 更新 README、runtime architecture 和 handoff；公开协议版本与兼容策略。
+- [x] 运行完整 `cargo test --locked`。
+- [x] 运行 `cargo clippy --locked --all-targets -- -D warnings`。
+- [x] 运行 `cargo fmt --all --check`。
+- [x] 运行 `$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps`。
+- [x] 运行 `git diff --check`。
 
 ### 后续阶段，不属于 RPC v1
 

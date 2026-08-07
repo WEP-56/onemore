@@ -3,6 +3,7 @@
 ## Design Documents
 
 - [Runtime 结构与弱 Harness 边界](docs/runtime-architecture.md)
+- [Rust SDK 与 JSONL RPC v1](docs/rpc-sdk-design.md)
 - [提示词缓存设计](docs/prompt-cache.md)
 - [API 兼容性与 Chat Completions 删除](docs/api-compatibility.md)
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
@@ -15,6 +16,7 @@ Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出�
 ```powershell
 cargo run
 cargo run -- --once "你好"
+cargo run -- --rpc
 cargo run -- -p deepseek
 ```
 
@@ -62,6 +64,59 @@ fn embedded_agent(
 `in_memory()` 不创建 SQLite、workspace 偏好或 skills 目录，也不会把 `load_skill` 及其
 提示词装进 Agent。宿主还可以分别注入 `ModelRegistry`、`SessionBackend`、
 `ModelPreferences` 或冻结的 `SkillCatalog`。
+
+需要完整 stateful harness 的嵌入方通过 `SessionController` 提交命令，并从有界
+`SessionEvents` 流消费进度和权威 snapshot。成功返回 `CommandReceipt` 表示 Runtime 已接纳，
+最终状态由 `CommandFinished` 报告，`Settled` 总是在相关终态之后：
+
+```rust
+use std::time::Duration;
+
+use onemore::runtime::Agent;
+use onemore::sdk::{spawn_session, SessionEvent, SessionPhase, SessionSnapshot};
+
+fn run_prompt(agent: Agent) -> Result<SessionSnapshot, Box<dyn std::error::Error>> {
+    let mut session = spawn_session(agent);
+    let receipt = session.controller.prompt("检查当前项目")?;
+
+    while let Ok(event) = session.events.recv() {
+        match event {
+            SessionEvent::Progress { progress } => eprintln!("{progress:?}"),
+            SessionEvent::CommandFinished { command_id, status, .. }
+                if command_id == receipt.command_id =>
+            {
+                eprintln!("command finished: {status:?}");
+            }
+            SessionEvent::Settled { .. } => break,
+            _ => {}
+        }
+    }
+
+    let snapshot = session
+        .controller
+        .wait_until_settled(Duration::from_secs(60))?;
+    assert_eq!(snapshot.phase, SessionPhase::Idle);
+    let _ = session.controller.shutdown();
+    Ok(snapshot)
+}
+```
+
+## JSONL RPC
+
+`--rpc` 在 stdin/stdout 上提供 UTF-8 JSONL v1。第一帧必须是 hello；stdout 只包含协议帧，
+诊断写 stderr。request response 可乱序返回，客户端应使用 request `id` 和 Runtime
+`command_id` 关联结果与事件。
+
+```powershell
+@(
+  '{"type":"hello","version":1}'
+  '{"type":"request","id":"snapshot","request":{"command":"get_snapshot"}}'
+  '{"type":"request","id":"shutdown","request":{"command":"shutdown"}}'
+) | cargo run --quiet -- --rpc
+```
+
+帧限制、公开数据白名单、完整命令集和审批示例见
+[Rust SDK 与 JSONL RPC v1](docs/rpc-sdk-design.md)。
 
 不需要 Onemore stateful harness 的宿主可以直接调用同一条生产 core loop：
 

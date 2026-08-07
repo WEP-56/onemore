@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::Receiver;
 
 use crate::agent_loop::{
     run_agent_loop, AgentLoopCallbacks, AgentLoopHost, ToolCall, ToolTurnResult,
@@ -10,7 +10,7 @@ use crate::agent_loop::{
 use crate::compaction::CompactionSettings;
 use crate::context::budget::{apply_budget, tool_spec_chars, BudgetDecision, ContextBudget};
 use crate::context::{ContextProvider, PromptContext};
-use crate::event::{AgentCommand, AgentEvent};
+use crate::event::{AgentCommand, AgentEvent, InputQueueKind};
 use crate::harness::SessionBackend;
 use crate::hooks::HookRegistry;
 use crate::message::{Block, ChatMessage, Role, StopReason, Usage};
@@ -25,8 +25,19 @@ use crate::tools::{ToolEffect, ToolError, ToolErrorCode, ToolOutcome, ToolSpec};
 use crate::util;
 use crate::workspace::Workspace;
 
+use super::inbox::CommandInbox;
 use super::tool_execution::{BatchItemState, DefaultToolExecutor};
 use super::{Agent, CompactionRuntime, RetryPolicy};
+
+#[derive(Debug, Default)]
+pub(super) struct RunReport {
+    pub cancelled: bool,
+    pub failed: bool,
+    pub processed_command_ids: Vec<String>,
+    pub cancelled_command_ids: Vec<String>,
+    pub control_command_ids: Vec<String>,
+    pub shutdown_requested: bool,
+}
 
 impl Agent {
     /// Start one stateful run, then delegate every model turn to the public core loop.
@@ -35,8 +46,8 @@ impl Agent {
         input: String,
         emit: &mut dyn FnMut(AgentEvent),
         cancel: &AtomicBool,
-        inbox: Option<&Receiver<AgentCommand>>,
-    ) {
+        inbox: Option<&dyn CommandInbox>,
+    ) -> RunReport {
         emit(AgentEvent::UserMessage(input.clone()));
         let prompt_hooks = self
             .hooks
@@ -51,13 +62,19 @@ impl Agent {
         }
         if !self.commit(submitted, emit) {
             emit(AgentEvent::TurnFinished { cancelled: false });
-            return;
+            return RunReport {
+                failed: true,
+                ..RunReport::default()
+            };
         }
         emit(AgentEvent::TurnStarted);
         if let Some(reason) = prompt_hooks.block {
             emit(AgentEvent::Error(reason));
             emit(AgentEvent::TurnFinished { cancelled: false });
-            return;
+            return RunReport {
+                failed: true,
+                ..RunReport::default()
+            };
         }
 
         let mut specs = self.tools.specs();
@@ -88,11 +105,31 @@ impl Agent {
             tool_timeout: self.tool_timeout,
             stop_hook_active: false,
             plan_reminder_sent: false,
+            processed_command_ids: Vec::new(),
+            cancelled_command_ids: Vec::new(),
+            control_command_ids: Vec::new(),
+            shutdown_requested: false,
+            dequeued_command_id: None,
         };
-        let callbacks = AgentLoopCallbacks::new(&mut host, emit, cancel)
+        let mut failed = false;
+        let mut tracked_emit = |event| {
+            if matches!(event, AgentEvent::Error(_)) {
+                failed = true;
+            }
+            emit(event);
+        };
+        let callbacks = AgentLoopCallbacks::new(&mut host, &mut tracked_emit, cancel)
             .max_turns(self.max_turns)
             .retry_policy(self.retry_policy);
-        run_agent_loop(provider, messages, &specs, callbacks);
+        let outcome = run_agent_loop(provider, messages, &specs, callbacks);
+        RunReport {
+            cancelled: outcome.cancelled,
+            failed,
+            processed_command_ids: std::mem::take(&mut host.processed_command_ids),
+            cancelled_command_ids: std::mem::take(&mut host.cancelled_command_ids),
+            control_command_ids: std::mem::take(&mut host.control_command_ids),
+            shutdown_requested: host.shutdown_requested,
+        }
     }
 
     /// 供宿主循环在一次命令处理后取走延迟命令逐条执行。
@@ -116,13 +153,18 @@ struct StatefulLoopHost<'a> {
     hooks: &'a mut HookRegistry,
     approval_rx: Option<&'a Receiver<ApprovalResponse>>,
     deferred: &'a mut VecDeque<AgentCommand>,
-    inbox: Option<&'a Receiver<AgentCommand>>,
+    inbox: Option<&'a dyn CommandInbox>,
     cancel: &'a AtomicBool,
     projection: ModelProjection,
     queues: RunQueues,
     tool_timeout: Option<std::time::Duration>,
     stop_hook_active: bool,
     plan_reminder_sent: bool,
+    processed_command_ids: Vec<String>,
+    cancelled_command_ids: Vec<String>,
+    control_command_ids: Vec<String>,
+    shutdown_requested: bool,
+    dequeued_command_id: Option<String>,
 }
 
 impl StatefulLoopHost<'_> {
@@ -376,23 +418,80 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
 
     fn poll_queues(&mut self, emit: &mut dyn FnMut(AgentEvent), cancel: &AtomicBool) {
         let Some(inbox) = self.inbox else { return };
-        loop {
-            match inbox.try_recv() {
-                Ok(AgentCommand::UserInput(text)) => {
+        while let Ok(mut pending) = inbox.try_recv_command() {
+            let command = pending.command.clone();
+            match command {
+                AgentCommand::UserInput(_) if pending.is_session() => {
+                    pending.reject(crate::sdk::SessionError::busy());
+                }
+                AgentCommand::UserInput(text) => {
+                    pending.accept();
                     emit(AgentEvent::Notice(
                         "当前轮进行中:该输入已按 steering 排队,将在本批工具完成后注入".into(),
                     ));
-                    self.queues.steering.push_back(text);
+                    self.queues.steering.push_back(QueuedInput {
+                        command_id: pending.command_id.clone(),
+                        text,
+                    });
                 }
-                Ok(AgentCommand::Steer(text)) => self.queues.steering.push_back(text),
-                Ok(AgentCommand::FollowUp(text)) => self.queues.follow_up.push_back(text),
-                Ok(AgentCommand::Shutdown) => {
+                AgentCommand::Steer(text) => {
+                    if text.trim().is_empty() {
+                        pending.reject(crate::sdk::SessionError::new(
+                            crate::sdk::SessionErrorCode::InvalidRequest,
+                            "steer text must not be empty",
+                        ));
+                    } else {
+                        let command_id = pending.command_id.clone();
+                        self.queues.steering.push_back(QueuedInput {
+                            command_id: command_id.clone(),
+                            text: text.clone(),
+                        });
+                        pending.accept();
+                        emit_queued(command_id, InputQueueKind::Steering, text, emit);
+                    }
+                }
+                AgentCommand::FollowUp(text) => {
+                    if text.trim().is_empty() {
+                        pending.reject(crate::sdk::SessionError::new(
+                            crate::sdk::SessionErrorCode::InvalidRequest,
+                            "follow_up text must not be empty",
+                        ));
+                    } else {
+                        let command_id = pending.command_id.clone();
+                        self.queues.follow_up.push_back(QueuedInput {
+                            command_id: command_id.clone(),
+                            text: text.clone(),
+                        });
+                        pending.accept();
+                        emit_queued(command_id, InputQueueKind::FollowUp, text, emit);
+                    }
+                }
+                AgentCommand::Abort => {
+                    pending.accept();
+                    cancel.store(true, Ordering::Relaxed);
+                    if let Some(command_id) = &pending.command_id {
+                        self.control_command_ids.push(command_id.clone());
+                    }
+                }
+                AgentCommand::Shutdown if pending.is_session() => {
+                    pending.accept();
+                    cancel.store(true, Ordering::Relaxed);
+                    self.shutdown_requested = true;
+                    if let Some(command_id) = &pending.command_id {
+                        self.control_command_ids.push(command_id.clone());
+                    }
+                }
+                AgentCommand::Shutdown => {
+                    pending.accept();
                     emit(AgentEvent::Notice("收到退出请求,正在结束当前轮…".into()));
                     cancel.store(true, Ordering::Relaxed);
                     self.deferred.push_back(AgentCommand::Shutdown);
                 }
-                Ok(other) => self.deferred.push_back(other),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                other if pending.is_session() => {
+                    let _ = other;
+                    pending.reject(crate::sdk::SessionError::busy());
+                }
+                other => self.deferred.push_back(other),
             }
         }
     }
@@ -452,14 +551,23 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
     }
 
     fn take_steering(&mut self) -> Option<ChatMessage> {
-        self.queues.steering.pop_front().map(ChatMessage::user_text)
+        self.queues.steering.pop_front().map(|input| {
+            if let Some(command_id) = input.command_id {
+                self.processed_command_ids.push(command_id.clone());
+                self.dequeued_command_id = Some(command_id);
+            }
+            ChatMessage::user_text(input.text)
+        })
     }
 
     fn take_follow_up(&mut self) -> Option<ChatMessage> {
-        self.queues
-            .follow_up
-            .pop_front()
-            .map(ChatMessage::user_text)
+        self.queues.follow_up.pop_front().map(|input| {
+            if let Some(command_id) = input.command_id {
+                self.processed_command_ids.push(command_id.clone());
+                self.dequeued_command_id = Some(command_id);
+            }
+            ChatMessage::user_text(input.text)
+        })
     }
 
     fn commit_input(
@@ -469,25 +577,61 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
         emit: &mut dyn FnMut(AgentEvent),
     ) -> anyhow::Result<Vec<ChatMessage>> {
         emit(AgentEvent::UserMessage(input.text()));
-        self.commit(vec![SessionEntryPayload::message(input, None)])
+        let messages = self.commit(vec![SessionEntryPayload::message(input, None)])?;
+        if let Some(command_id) = self.dequeued_command_id.take() {
+            emit(AgentEvent::InputDequeued { command_id });
+        }
+        Ok(messages)
     }
 
     fn finish(&mut self, cancelled: bool, emit: &mut dyn FnMut(AgentEvent)) {
         if cancelled {
             if let Some(inbox) = self.inbox {
-                loop {
-                    match inbox.try_recv() {
-                        Ok(AgentCommand::UserInput(text) | AgentCommand::Steer(text)) => {
-                            self.queues.steering.push_back(text);
+                while let Ok(mut pending) = inbox.try_recv_command() {
+                    let command = pending.command.clone();
+                    match command {
+                        AgentCommand::UserInput(_) if pending.is_session() => {
+                            pending.reject(crate::sdk::SessionError::busy());
                         }
-                        Ok(AgentCommand::FollowUp(text)) => {
-                            self.queues.follow_up.push_back(text);
+                        AgentCommand::UserInput(text) | AgentCommand::Steer(text) => {
+                            let command_id = pending.command_id.clone();
+                            self.queues.steering.push_back(QueuedInput {
+                                command_id: command_id.clone(),
+                                text: text.clone(),
+                            });
+                            pending.accept();
+                            emit_queued(command_id, InputQueueKind::Steering, text, emit);
                         }
-                        Ok(AgentCommand::Shutdown) => {
+                        AgentCommand::FollowUp(text) => {
+                            let command_id = pending.command_id.clone();
+                            self.queues.follow_up.push_back(QueuedInput {
+                                command_id: command_id.clone(),
+                                text: text.clone(),
+                            });
+                            pending.accept();
+                            emit_queued(command_id, InputQueueKind::FollowUp, text, emit);
+                        }
+                        AgentCommand::Abort => {
+                            pending.accept();
+                            if let Some(command_id) = &pending.command_id {
+                                self.control_command_ids.push(command_id.clone());
+                            }
+                        }
+                        AgentCommand::Shutdown if pending.is_session() => {
+                            pending.accept();
+                            self.shutdown_requested = true;
+                            if let Some(command_id) = &pending.command_id {
+                                self.control_command_ids.push(command_id.clone());
+                            }
+                        }
+                        AgentCommand::Shutdown => {
                             self.deferred.push_back(AgentCommand::Shutdown);
                         }
-                        Ok(other) => self.deferred.push_back(other),
-                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                        other if pending.is_session() => {
+                            let _ = other;
+                            pending.reject(crate::sdk::SessionError::busy());
+                        }
+                        other => self.deferred.push_back(other),
                     }
                 }
             }
@@ -505,10 +649,21 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
                 }
             }
         }
-        let dropped = self.queues.steering.len() + self.queues.follow_up.len();
+        let mut dropped = 0usize;
+        for input in self
+            .queues
+            .steering
+            .drain(..)
+            .chain(self.queues.follow_up.drain(..))
+        {
+            dropped += 1;
+            if let Some(command_id) = input.command_id {
+                self.cancelled_command_ids.push(command_id);
+            }
+        }
         if dropped > 0 {
             emit(AgentEvent::Notice(format!(
-                "本轮结束,已丢弃 {dropped} 条未注入的排队输入"
+                "本轮结束,已取消并丢弃 {dropped} 条未注入的排队输入"
             )));
         }
         emit(AgentEvent::TurnFinished { cancelled });
@@ -517,8 +672,28 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
 
 #[derive(Default)]
 struct RunQueues {
-    steering: VecDeque<String>,
-    follow_up: VecDeque<String>,
+    steering: VecDeque<QueuedInput>,
+    follow_up: VecDeque<QueuedInput>,
+}
+
+struct QueuedInput {
+    command_id: Option<String>,
+    text: String,
+}
+
+fn emit_queued(
+    command_id: Option<String>,
+    kind: InputQueueKind,
+    text: String,
+    emit: &mut dyn FnMut(AgentEvent),
+) {
+    if let Some(command_id) = command_id {
+        emit(AgentEvent::InputQueued {
+            command_id,
+            kind,
+            text,
+        });
+    }
 }
 
 pub(super) fn emit_plan_updated(snapshot: &PlanSnapshot, emit: &mut dyn FnMut(AgentEvent)) {

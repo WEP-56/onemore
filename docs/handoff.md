@@ -3,7 +3,7 @@
 更新日期：2026-08-07  
 工作区：`E:\onemore-cli`  
 分支：`main`  
-当前 HEAD：`2a3e029 停止功能增量更新，优化目录结构、稳定性、已有功能`
+当前 HEAD：`3473c60 制作远程协议施工文档`
 
 ## 目标与约束
 
@@ -19,30 +19,10 @@ planning、compaction、permissions、skills 等属于可替换 harness。
 
 ## 当前 Git 状态
 
-HEAD 已包含第一轮 provider 可靠性修复和 `runtime` 目录拆分。HEAD 之后还有一组**未提交**
-的弱 harness 解耦改动。不要 reset、checkout 或覆盖这些文件。
-
-当前未提交文件以 `git status --short` 为准，主要包括：
-
-```text
-README.md
-docs/runtime-architecture.md
-src/config.rs + src/config/tests.rs
-src/context/instructions.rs
-src/event.rs
-src/harness.rs + src/harness/{model,memory}.rs
-src/lib.rs
-src/agent_loop.rs + src/agent_loop/{model_call,tests}.rs
-src/runtime.rs
-src/runtime/{agent_loop,builder,commands,tool_execution}.rs
-src/runtime/tests.rs
-src/runtime/tests/{builder,concurrency}.rs
-src/session.rs
-src/storage.rs + src/storage/tests.rs
-src/tools/mod.rs
-```
-
-没有创建 commit；由后续接手者或用户决定何时提交。
+HEAD 已包含 provider 可靠性、弱 harness、根目录 `AGENTS.md`、自动上下文压缩，以及
+`docs/rpc-sdk-design.md` 的 RPC/SDK v1 规格。当前工作区是该规格的未提交实现，涉及 SDK view、
+SessionController、TUI/`--once` 迁移和 JSONL RPC。不要 reset、checkout 或覆盖这些文件；
+以 `git status --short` 为准继续收尾。
 
 ## HEAD 已完成的可靠性修复
 
@@ -288,21 +268,51 @@ $env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
 git diff --check
 ```
 
-## 下一会话工作顺序
+## 当前阶段：Rust SDK 与 JSONL RPC v1
 
-### 1. RPC / SDK 外部连接协议
+已实现：
 
-- 自动压缩稳定后，参考 Pi RPC 模式定义可长期维护的外部协议。
-- 其他进程应能驱动 agent、发送 steering/follow-up、接收流式事件并完成审批往返。
-- 协议层只依赖稳定 SDK 边界，不泄漏 TUI、SQLite 或默认 CLI 组件；CLI 与外部连接必须
-  驱动同一条 `run_agent_loop` 生产路径。
+- `src/sdk.rs` 与 `src/sdk/`：稳定 view types、sanitized fact projection、
+  `SessionController`、`SessionEvents`、admission receipt、phase、command terminal 和 settled。
+- `src/runtime/{inbox,session_runtime,session_events}.rs`：有界 command/event worker、运行中
+  prompt busy、steering/follow-up 可观察队列、detached shutdown，以及 approval 原子占用。
+- TUI、`--once`、Rust embed 和 RPC 全部使用 `sdk::spawn_session`，旧 `RuntimeHandle` 与旧
+  production spawn 已删除。
+- `src/rpc.rs` 与 `src/rpc/`：4 MiB LF JSONL framing、hello/version、严格 wire DTO、完整 v1
+  command adapter、重复 request ID、EOF/broken-pipe 收尾和 CLI `--rpc`。
+- RPC 服务循环保持排空有界事件队列；可能等待 runtime checkpoint 的请求在独立 worker 中做
+  admission，避免主 writer 与 event producer 互相阻塞。
 
-### 2. 轻量插件协议
+关键回归测试：
 
-- 仅在 SDK 边界稳定后设计。
-- 第一版只覆盖真实扩展点：tools、context、hooks、model registry；避免提前引入复杂生命周期、
-  包管理或兼容层。
+- snapshot 不泄漏 provider raw、thinking raw、工具原始参数或任意 details。
+- `CommandFinished` 先于 `Settled`，运行中第二个 prompt 返回 `busy`。
+- steering queue 在 snapshot 中出现并在提交后移除，每个 accepted command 只有一个终态。
+- session backend 的 list 错误会唤醒 controller，不会永久等待 Condvar。
+- JSONL 覆盖 hello、prompt/events/snapshot、重复 ID、未知字段、busy、审批往返、EOF、
+  broken pipe、CRLF、真实 U+2028、半帧 EOF 和超长帧。
+- `tests/rpc_wire.rs` 启动真实 `onemore --rpc` 子进程和本地 SSE provider，覆盖 prompt、
+  stdout 纯协议、最终 snapshot/settled 与 shutdown。
 
-贯穿后续工作的约束：无需迁移旧数据或旧配置；继续重视弱 harness、极简接口、生产路径
-唯一、ToolUse/ToolResult 配对、append-only 事实日志、单文件规模与目录可读性。每阶段完成后
-必须运行完整测试、Clippy、fmt、rustdoc 与 `git diff --check`。
+当前完整验证已通过：
+
+```text
+cargo test --locked
+  192 unit + 1 RPC subprocess + 8 provider wire tests passed
+
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all --check
+$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
+```
+
+设计清单仍明确保留的后续覆盖：
+
+1. 慢 reader 的确定性背压测试。
+2. RPC 层 allow-session/deny/断连审批矩阵。
+3. 子进程层补齐 steer、abort、compact、model 和 session 命令矩阵。
+
+这些是测试覆盖扩展，不需要新增生产执行路径。当前提交前只需检查最终 diff 和工作区状态；
+不要创建 commit，除非用户明确要求。
+
+RPC v1 之后再评估轻量插件协议。第一版插件只应覆盖已有真实扩展点：tools、context、hooks、
+model registry，不提前引入包管理或另一条 agent 执行路径。

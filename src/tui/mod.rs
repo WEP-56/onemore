@@ -27,7 +27,9 @@ mod input;
 mod picker;
 mod transcript;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -44,13 +46,22 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::{
     ActiveModelSelection, ModelCatalogEntry, ProviderCatalogEntry, DEFAULT_REASONING_EFFORT,
 };
-use crate::event::{AgentCommand, AgentEvent};
-use crate::message::{Block as MessageBlock, ChatMessage, Role, Usage};
+use crate::event::AgentCommand;
+#[cfg(test)]
+use crate::event::AgentEvent;
+use crate::message::Usage;
+#[cfg(test)]
+use crate::message::{Block as MessageBlock, ChatMessage, Role};
 use crate::permission::{ApprovalDecision, ApprovalRequest, ApprovalResponse, ApprovalScope};
+#[cfg(test)]
 use crate::plan::reduce_plan;
-use crate::runtime::RuntimeHandle;
+use crate::plan::PlanItem;
+use crate::sdk::{
+    AgentSession, ProgressEvent, SessionController, SessionEvent, SessionEvents, SessionPhase,
+    SkillMetadataView, TranscriptItem,
+};
+#[cfg(test)]
 use crate::session::{SessionEntry, SessionEntryPayload};
-use crate::skills::SkillMetadata;
 use crate::util;
 use input::InputBox;
 use picker::{Picker, PickerItem};
@@ -114,7 +125,7 @@ struct PendingReasoningSelection {
     effort_only: bool,
 }
 
-pub fn run(handle: RuntimeHandle) -> anyhow::Result<()> {
+pub fn run(session: AgentSession) -> anyhow::Result<()> {
     let (_, terminal_rows) = ratatui::crossterm::terminal::size()?;
     let viewport_height = INLINE_VIEWPORT_ROWS.min(terminal_rows.max(1));
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
@@ -122,7 +133,7 @@ pub fn run(handle: RuntimeHandle) -> anyhow::Result<()> {
     })?;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
 
-    let mut app = App::new(handle);
+    let mut app = App::from_session(session)?;
     app.transcript.push_notice(format!(
         "Onemore 已就绪({}) · 会话 {},输入内容开始对话,/help 查看命令",
         app.provider_label,
@@ -136,8 +147,58 @@ pub fn run(handle: RuntimeHandle) -> anyhow::Result<()> {
     result
 }
 
+trait UiRuntime {
+    fn submit(&self, command: AgentCommand);
+    fn cancel(&self);
+    fn shutdown(&self);
+    fn approve(&self, response: ApprovalResponse);
+}
+
+impl UiRuntime for SessionController {
+    fn submit(&self, command: AgentCommand) {
+        // Admission may wait for a model checkpoint; the UI thread must keep draining events.
+        let controller = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("tui-command-admission".into())
+            .spawn(move || {
+                let _ = controller.submit_raw(command);
+            });
+    }
+
+    fn cancel(&self) {
+        self.cancel_now();
+    }
+
+    fn shutdown(&self) {
+        self.cancel_now();
+        let controller = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("tui-shutdown".into())
+            .spawn(move || {
+                let _ = controller.send_detached(AgentCommand::Shutdown);
+            });
+    }
+
+    fn approve(&self, response: ApprovalResponse) {
+        let decision = match response.decision {
+            ApprovalDecision::Allow(ApprovalScope::Once) => {
+                crate::sdk::ApprovalDecisionView::AllowOnce
+            }
+            ApprovalDecision::Allow(ApprovalScope::Session) => {
+                crate::sdk::ApprovalDecisionView::AllowSession
+            }
+            ApprovalDecision::Deny => crate::sdk::ApprovalDecisionView::Deny,
+        };
+        let _ = self.respond_to_approval(crate::sdk::ApprovalResponseView {
+            request_id: response.request_id,
+            decision,
+        });
+    }
+}
+
 struct App {
-    handle: RuntimeHandle,
+    runtime: Box<dyn UiRuntime>,
+    events: Option<SessionEvents>,
     transcript: Transcript,
     input: InputBox,
     overlay: Option<Overlay>,
@@ -157,7 +218,7 @@ struct App {
     provider_label: String,
     active_selection: ActiveModelSelection,
     provider_catalog: Vec<ProviderCatalogEntry>,
-    skills: Vec<SkillMetadata>,
+    skills: Vec<SkillMetadataView>,
     reasoning_preferences: BTreeMap<String, BTreeMap<String, String>>,
     pending_reasoning: Option<PendingReasoningSelection>,
     session_id: String,
@@ -173,14 +234,37 @@ struct App {
 }
 
 impl App {
-    fn new(handle: RuntimeHandle) -> App {
-        let provider_label = handle.provider_label.clone();
-        let active_selection = handle.active_selection.clone();
-        let provider_catalog = handle.provider_catalog.clone();
-        let reasoning_preferences = handle.reasoning_preferences.clone();
-        let session_id = handle.session_id.clone();
+    fn from_session(session: AgentSession) -> anyhow::Result<App> {
+        let snapshot = session.controller.snapshot()?;
+        let ui = session.controller.ui_metadata();
+        let active_selection = ActiveModelSelection {
+            provider: snapshot.model.provider,
+            model: snapshot.model.model,
+            effort: snapshot.model.effort,
+        };
+        Ok(App::new(
+            Box::new(session.controller),
+            Some(session.events),
+            snapshot.model.label,
+            active_selection,
+            ui.provider_catalog,
+            ui.reasoning_preferences,
+            snapshot.session_id,
+        ))
+    }
+
+    fn new(
+        runtime: Box<dyn UiRuntime>,
+        events: Option<SessionEvents>,
+        provider_label: String,
+        active_selection: ActiveModelSelection,
+        provider_catalog: Vec<ProviderCatalogEntry>,
+        reasoning_preferences: BTreeMap<String, BTreeMap<String, String>>,
+        session_id: String,
+    ) -> App {
         App {
-            handle,
+            runtime,
+            events,
             transcript: Transcript::default(),
             input: InputBox::default(),
             overlay: None,
@@ -214,8 +298,13 @@ impl App {
         let mut dirty = true;
         loop {
             // 1. 应用 Runtime 事件
-            while let Ok(ev) = self.handle.events.try_recv() {
-                self.on_agent_event(ev);
+            loop {
+                let event = self
+                    .events
+                    .as_mut()
+                    .and_then(|events| events.try_recv().ok());
+                let Some(event) = event else { break };
+                self.on_session_event(event);
                 dirty = true;
             }
             // 2. 终端输入:一帧内把积压处理干净(粘贴洪峰时避免一字符一帧),
@@ -310,6 +399,318 @@ impl App {
 
     // ---- Runtime 事件 → 界面状态 ----
 
+    fn on_session_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::SessionSnapshot { snapshot } => {
+                let snapshot = *snapshot;
+                let session_changed = self.session_id != snapshot.session_id;
+                self.session_id = snapshot.session_id;
+                self.provider_label = snapshot.model.label;
+                self.active_selection = ActiveModelSelection {
+                    provider: snapshot.model.provider,
+                    model: snapshot.model.model,
+                    effort: snapshot.model.effort,
+                };
+                self.usage = Usage {
+                    input_tokens: snapshot.usage.input_tokens,
+                    output_tokens: snapshot.usage.output_tokens,
+                    cache: match (
+                        snapshot.usage.cache_read_tokens,
+                        snapshot.usage.cache_write_tokens,
+                    ) {
+                        (None, None) => None,
+                        (read, write) => Some(crate::message::CacheUsage {
+                            read_tokens: read.unwrap_or(0),
+                            write_tokens: write.unwrap_or(0),
+                        }),
+                    },
+                };
+                self.busy = snapshot.phase != SessionPhase::Idle;
+                self.status_note = match snapshot.phase {
+                    SessionPhase::Idle => String::new(),
+                    SessionPhase::Running => "思考中".into(),
+                    SessionPhase::Retrying => "重试中".into(),
+                    SessionPhase::Compacting => "压缩中".into(),
+                    SessionPhase::WaitingApproval => "等待审批".into(),
+                    SessionPhase::ShuttingDown => "退出中".into(),
+                };
+                if session_changed {
+                    self.restore_snapshot_transcript(&snapshot.transcript);
+                    self.scroll_up = 0;
+                }
+            }
+            SessionEvent::Progress { progress } => self.on_progress(progress),
+            SessionEvent::CommandFinished { status, .. } => {
+                if status == crate::sdk::CommandStatus::Cancelled {
+                    self.transcript.push_notice("已取消".into());
+                }
+            }
+            SessionEvent::Settled { .. } => {
+                self.busy = false;
+                self.status_note.clear();
+                self.transcript.close_open_cells();
+            }
+        }
+    }
+
+    fn on_progress(&mut self, progress: ProgressEvent) {
+        match progress {
+            ProgressEvent::UserMessage { text } => self.transcript.push_user(text),
+            ProgressEvent::RunStarted { .. } => {
+                self.busy = true;
+                self.status_note = "思考中".into();
+            }
+            ProgressEvent::AssistantDelta { kind, delta, .. } if kind == "thinking" => {
+                self.transcript.append_thinking(&delta)
+            }
+            ProgressEvent::AssistantDelta { delta, .. } => self.transcript.append_assistant(&delta),
+            ProgressEvent::AssistantFinished { text, .. } => {
+                self.transcript.finalize_assistant(text)
+            }
+            ProgressEvent::ToolCallPending { name } => {
+                self.status_note = format!("正在生成 {} 的参数", name)
+            }
+            ProgressEvent::ToolStarted {
+                tool_call_id,
+                name,
+                summary,
+            } => {
+                self.status_note = format!("执行 {}", name);
+                self.transcript.push_tool(tool_call_id, name, summary);
+            }
+            ProgressEvent::ToolUpdated { output, .. } => {
+                self.status_note = format!("工具进度: {}", output)
+            }
+            ProgressEvent::ToolFinished {
+                tool_call_id,
+                output,
+                error,
+                ..
+            } => {
+                self.status_note = "思考中".into();
+                self.transcript
+                    .finish_tool(&tool_call_id, output, error.is_some());
+            }
+            ProgressEvent::ApprovalRequested { request } => {
+                self.status_note = format!("等待审批: {}", request.tool);
+                self.overlay = Some(Overlay::Approval {
+                    request: ApprovalRequest {
+                        request_id: request.request_id,
+                        tool: request.tool,
+                        summary: request.summary,
+                        reason: request.reason,
+                        scopes: request
+                            .scopes
+                            .into_iter()
+                            .map(|scope| match scope {
+                                crate::sdk::ApprovalScopeView::Once => ApprovalScope::Once,
+                                crate::sdk::ApprovalScopeView::Session => ApprovalScope::Session,
+                            })
+                            .collect(),
+                    },
+                    selected: 0,
+                });
+            }
+            ProgressEvent::ApprovalResolved {
+                request_id,
+                allowed,
+            } => {
+                if matches!(
+                    &self.overlay,
+                    Some(Overlay::Approval { request, .. }) if request.request_id == request_id
+                ) {
+                    self.overlay = None;
+                }
+                self.status_note = if allowed {
+                    "审批通过，正在执行".into()
+                } else {
+                    "审批未通过".into()
+                };
+            }
+            ProgressEvent::Notice { text, .. } => self.transcript.push_notice(text),
+            ProgressEvent::Error { error } => {
+                if matches!(self.overlay, Some(Overlay::Loading { .. })) {
+                    self.overlay = None;
+                }
+                self.transcript.push_error(error.message);
+            }
+            ProgressEvent::PlanUpdated { plan } => self.transcript.push_plan(
+                plan.revision,
+                plan.items
+                    .into_iter()
+                    .map(|item| PlanItem {
+                        id: item.id,
+                        text: item.text,
+                        status: item.status,
+                    })
+                    .collect(),
+                plan.explanation,
+            ),
+            ProgressEvent::SkillsDiscovered { skills, warnings } => {
+                self.skills = skills.clone();
+                self.status_note = format!("已发现 {} 个技能", skills.len());
+                if !skills.is_empty() {
+                    self.transcript
+                        .push_notice(format!("已发现 {} 个可用技能", skills.len()));
+                }
+                for warning in warnings {
+                    self.transcript
+                        .push_notice(format!("技能发现警告: {}", warning));
+                }
+            }
+            ProgressEvent::Usage { usage } => {
+                self.usage = Usage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache: match (usage.cache_read_tokens, usage.cache_write_tokens) {
+                        (None, None) => None,
+                        (read, write) => Some(crate::message::CacheUsage {
+                            read_tokens: read.unwrap_or(0),
+                            write_tokens: write.unwrap_or(0),
+                        }),
+                    },
+                };
+            }
+            ProgressEvent::ConversationCleared => {
+                self.transcript.clear();
+                self.usage = Usage::default();
+                self.transcript.push_notice("会话已清空".into());
+            }
+            ProgressEvent::ModelSelectionChanged { selection } => {
+                self.apply_model_view(
+                    selection.provider,
+                    selection.model,
+                    selection.effort,
+                    selection.label,
+                );
+            }
+            ProgressEvent::SessionsListed {
+                current_id,
+                sessions,
+            } => self.show_session_picker(current_id, sessions),
+        }
+    }
+
+    fn apply_model_view(&mut self, provider: String, model: String, effort: String, label: String) {
+        let default_effort = self
+            .provider_catalog
+            .iter()
+            .find(|entry| entry.name == provider)
+            .and_then(|entry| entry.models.iter().find(|entry| entry.id == model))
+            .map(|entry| entry.default_effort.clone())
+            .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_string());
+        self.provider_label = label;
+        self.active_selection = ActiveModelSelection {
+            provider: provider.clone(),
+            model: model.clone(),
+            effort: effort.clone(),
+        };
+        if effort == default_effort {
+            if let Some(models) = self.reasoning_preferences.get_mut(&provider) {
+                models.remove(&model);
+                if models.is_empty() {
+                    self.reasoning_preferences.remove(&provider);
+                }
+            }
+        } else {
+            self.reasoning_preferences
+                .entry(provider)
+                .or_default()
+                .insert(model, effort);
+        }
+    }
+
+    fn show_session_picker(
+        &mut self,
+        current_id: String,
+        sessions: Vec<crate::sdk::SessionSummaryView>,
+    ) {
+        if !matches!(
+            self.overlay,
+            Some(Overlay::Loading {
+                kind: PickerKind::Session,
+                ..
+            })
+        ) {
+            return;
+        }
+        let items = sessions
+            .into_iter()
+            .map(|session| {
+                let is_current = session.id == current_id;
+                let label = if session.title.is_empty() {
+                    format!("会话 {}", short_id(&session.id))
+                } else {
+                    session.title
+                };
+                PickerItem {
+                    label,
+                    description: format!(
+                        "{} 条消息 · {}{}",
+                        session.message_count,
+                        short_id(&session.id),
+                        if is_current { " · 当前" } else { "" }
+                    ),
+                    value: Some(session.id),
+                    current: is_current,
+                }
+            })
+            .collect();
+        self.overlay = Some(Overlay::Picker {
+            kind: PickerKind::Session,
+            picker: Picker::new("恢复会话", items),
+        });
+    }
+
+    fn restore_snapshot_transcript(&mut self, items: &[TranscriptItem]) {
+        self.transcript.clear();
+        for item in items {
+            match item {
+                TranscriptItem::UserMessage { text, .. } => {
+                    self.transcript.push_user(text.clone());
+                }
+                TranscriptItem::AssistantMessage { blocks, .. } => {
+                    let mut text = String::new();
+                    for block in blocks {
+                        match block {
+                            crate::sdk::AssistantBlockView::Text { text: block } => {
+                                text.push_str(block);
+                            }
+                            crate::sdk::AssistantBlockView::Thinking { text } => {
+                                self.transcript.append_thinking(text);
+                            }
+                            crate::sdk::AssistantBlockView::ToolCall { .. } => {}
+                        }
+                    }
+                    if !text.is_empty() {
+                        self.transcript.append_assistant(&text);
+                        self.transcript.finalize_assistant(text);
+                    }
+                }
+                TranscriptItem::Tool {
+                    tool_call_id,
+                    name,
+                    summary,
+                    status,
+                    output,
+                } => {
+                    self.transcript
+                        .push_tool(tool_call_id.clone(), name.clone(), summary.clone());
+                    self.transcript.finish_tool(
+                        tool_call_id,
+                        output.clone().unwrap_or_default(),
+                        *status == crate::sdk::ToolStatus::Failed,
+                    );
+                }
+                TranscriptItem::Notice { text, .. } => {
+                    self.transcript.push_notice(text.clone());
+                }
+            }
+        }
+        self.transcript.close_open_cells();
+    }
+
+    #[cfg(test)]
     fn on_agent_event(&mut self, ev: AgentEvent) {
         match ev {
             AgentEvent::UserMessage(t) => self.transcript.push_user(t),
@@ -343,7 +744,17 @@ impl App {
                 explanation,
             } => self.transcript.push_plan(revision, items, explanation),
             AgentEvent::SkillsDiscovered { skills, warnings } => {
-                self.skills = skills.clone();
+                self.skills = skills
+                    .iter()
+                    .map(|skill| SkillMetadataView {
+                        name: skill.name.clone(),
+                        description: skill.description.clone(),
+                        scope: match skill.scope {
+                            crate::skills::SkillScope::Repo => crate::sdk::SkillScopeView::Repo,
+                            crate::skills::SkillScope::User => crate::sdk::SkillScopeView::User,
+                        },
+                    })
+                    .collect();
                 self.status_note = format!("已发现 {} 个技能", skills.len());
                 if !skills.is_empty() {
                     self.transcript
@@ -498,6 +909,7 @@ impl App {
                 ));
                 self.scroll_up = 0;
             }
+            AgentEvent::InputQueued { .. } | AgentEvent::InputDequeued { .. } => {}
             AgentEvent::TurnFinished { cancelled } => {
                 self.busy = false;
                 self.status_note.clear();
@@ -511,6 +923,7 @@ impl App {
 
     /// 按事实日志重建画面:Message 还原对话与工具单元,
     /// Notice/Compaction/ModelChange 等 UI-only 事实以提示行呈现。
+    #[cfg(test)]
     fn restore_transcript(&mut self, entries: &[SessionEntry]) {
         let plan = reduce_plan(entries);
         let results: HashMap<&str, (&str, bool)> = entries
@@ -567,6 +980,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn restore_message(&mut self, message: &ChatMessage, results: &HashMap<&str, (&str, bool)>) {
         match message.role {
             Role::User => {
@@ -712,9 +1126,7 @@ impl App {
                     self.slash_dismissed = Some(self.input.text().to_string());
                 } else if self.busy {
                     // 请求取消当前轮;Runtime 在下一个流事件/工具间隙生效
-                    self.handle
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.runtime.cancel();
                     self.status_note = "取消中…".into();
                 } else if self.scroll_up > 0 {
                     self.scroll_up = 0;
@@ -865,7 +1277,7 @@ impl App {
             },
         }
         if let Some(response) = approval {
-            let _ = self.handle.approvals.send(response);
+            self.runtime.approve(response);
             self.overlay = None;
         } else if accept_picker {
             self.accept_picker();
@@ -883,10 +1295,7 @@ impl App {
         let Some((kind, item)) = selected else { return };
         match (kind, item.value) {
             (PickerKind::Provider, Some(provider)) => {
-                let _ = self
-                    .handle
-                    .commands
-                    .send(AgentCommand::SwitchProvider(provider));
+                self.runtime.submit(AgentCommand::SwitchProvider(provider));
                 self.overlay = None;
             }
             (PickerKind::Model, Some(model)) => {
@@ -905,14 +1314,11 @@ impl App {
                         effort,
                     }
                 };
-                let _ = self.handle.commands.send(command);
+                self.runtime.submit(command);
                 self.overlay = None;
             }
             (PickerKind::Session, Some(session_id)) => {
-                let _ = self
-                    .handle
-                    .commands
-                    .send(AgentCommand::LoadSession(session_id));
+                self.runtime.submit(AgentCommand::LoadSession(session_id));
                 self.overlay = None;
             }
             (PickerKind::Skill, Some(name)) => {
@@ -974,18 +1380,13 @@ impl App {
             return;
         }
         if self.busy {
-            self.handle
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.runtime.cancel();
         }
         self.quit_armed_at = Some(Instant::now());
     }
 
     fn quit(&mut self) {
-        self.handle
-            .cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = self.handle.commands.send(AgentCommand::Shutdown);
+        self.runtime.shutdown();
         self.should_quit = true;
     }
 
@@ -1007,13 +1408,13 @@ impl App {
             self.history_idx = None;
             self.transcript
                 .push_notice("已排队为 steering,将在当前一批工具完成后注入(Esc 取消本轮)".into());
-            let _ = self.handle.commands.send(AgentCommand::Steer(text));
+            self.runtime.submit(AgentCommand::Steer(text));
             return;
         }
         self.history.push(text.clone());
         self.history_idx = None;
         self.scroll_up = 0;
-        let _ = self.handle.commands.send(AgentCommand::UserInput(text));
+        self.runtime.submit(AgentCommand::UserInput(text));
     }
 
     fn handle_slash(&mut self, cmd: &str) {
@@ -1035,10 +1436,10 @@ impl App {
             command::SlashCommand::Quit => self.quit(),
             command::SlashCommand::Clear => {
                 // 命令走通道排队,真正清空以 ConversationCleared 事件为准
-                let _ = self.handle.commands.send(AgentCommand::ClearConversation);
+                self.runtime.submit(AgentCommand::ClearConversation);
             }
             command::SlashCommand::Compact => {
-                let _ = self.handle.commands.send(AgentCommand::Compact);
+                self.runtime.submit(AgentCommand::Compact);
             }
             command::SlashCommand::Queue => {
                 if rest.is_empty() {
@@ -1047,10 +1448,8 @@ impl App {
                 } else {
                     self.transcript
                         .push_notice("已排队为后续任务,当前任务结束后执行".into());
-                    let _ = self
-                        .handle
-                        .commands
-                        .send(AgentCommand::FollowUp(rest.to_string()));
+                    self.runtime
+                        .submit(AgentCommand::FollowUp(rest.to_string()));
                 }
             }
             command::SlashCommand::Session => {
@@ -1059,12 +1458,10 @@ impl App {
                         kind: PickerKind::Session,
                         title: "正在读取会话…".into(),
                     });
-                    let _ = self.handle.commands.send(AgentCommand::ListSessions);
+                    self.runtime.submit(AgentCommand::ListSessions);
                 } else {
-                    let _ = self
-                        .handle
-                        .commands
-                        .send(AgentCommand::LoadSession(rest.to_string()));
+                    self.runtime
+                        .submit(AgentCommand::LoadSession(rest.to_string()));
                 }
             }
             command::SlashCommand::Skill => {
@@ -1078,10 +1475,8 @@ impl App {
                 if rest.is_empty() {
                     self.open_provider_picker();
                 } else {
-                    let _ = self
-                        .handle
-                        .commands
-                        .send(AgentCommand::SwitchProvider(rest.to_string()));
+                    self.runtime
+                        .submit(AgentCommand::SwitchProvider(rest.to_string()));
                 }
             }
             command::SlashCommand::Model => {
@@ -1112,7 +1507,14 @@ impl App {
             .iter()
             .map(|skill| PickerItem {
                 label: skill.name.clone(),
-                description: format!("{} · {}", skill.scope.as_str(), skill.description),
+                description: format!(
+                    "{} · {}",
+                    match skill.scope {
+                        crate::sdk::SkillScopeView::Repo => "repo",
+                        crate::sdk::SkillScopeView::User => "user",
+                    },
+                    skill.description
+                ),
                 value: Some(skill.name.clone()),
                 current: false,
             })
@@ -1135,7 +1537,7 @@ impl App {
         self.history.push(text.clone());
         self.history_idx = None;
         self.scroll_up = 0;
-        let _ = self.handle.commands.send(AgentCommand::UserInput(text));
+        self.runtime.submit(AgentCommand::UserInput(text));
     }
 
     fn open_provider_picker(&mut self) {
@@ -1246,7 +1648,7 @@ impl App {
         match effort {
             None => self.open_reasoning_picker(model.to_string(), false),
             Some(effort) if entry.efforts.iter().any(|item| item == effort) => {
-                let _ = self.handle.commands.send(AgentCommand::SelectModel {
+                self.runtime.submit(AgentCommand::SelectModel {
                     model: model.to_string(),
                     effort: effort.to_string(),
                 });
@@ -1280,10 +1682,8 @@ impl App {
             ));
             return;
         }
-        let _ = self
-            .handle
-            .commands
-            .send(AgentCommand::SetReasoningEffort(effort.to_string()));
+        self.runtime
+            .submit(AgentCommand::SetReasoningEffort(effort.to_string()));
     }
 
     fn current_provider(&self) -> Option<&ProviderCatalogEntry> {
@@ -1658,10 +2058,37 @@ fn short_id(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::SkillMetadata;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+
+    struct FakeUiRuntime {
+        commands: std::sync::mpsc::Sender<AgentCommand>,
+        approvals: std::sync::mpsc::Sender<ApprovalResponse>,
+        cancel: Arc<AtomicBool>,
+    }
+
+    impl UiRuntime for FakeUiRuntime {
+        fn submit(&self, command: AgentCommand) {
+            let _ = self.commands.send(command);
+        }
+
+        fn cancel(&self) {
+            self.cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn shutdown(&self) {
+            self.cancel();
+            let _ = self.commands.send(AgentCommand::Shutdown);
+        }
+
+        fn approve(&self, response: ApprovalResponse) {
+            let _ = self.approvals.send(response);
+        }
+    }
 
     /// 造一个没有真实 Runtime 的 App;返回事件发送端与命令接收端,
     /// 便于测试注入事件、断言提交行为。
@@ -1673,61 +2100,71 @@ mod tests {
     ) {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
         let (approval_tx, approval_rx) = std::sync::mpsc::channel();
-        let (evt_tx, evt_rx) = std::sync::mpsc::channel();
-        let handle = RuntimeHandle {
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let runtime = FakeUiRuntime {
             commands: cmd_tx,
             approvals: approval_tx,
-            events: evt_rx,
             cancel: Arc::new(AtomicBool::new(false)),
-            provider_label: "mock / test-model / effort=medium".into(),
-            active_selection: ActiveModelSelection {
-                provider: "mock".into(),
-                model: "test-model".into(),
-                effort: "medium".into(),
-            },
-            provider_catalog: vec![
-                ProviderCatalogEntry {
-                    name: "mock".into(),
-                    default_model: "test-model".into(),
-                    models: vec![
-                        ModelCatalogEntry {
-                            id: "test-model".into(),
-                            context_window: Some(100_000),
-                            max_tokens: Some(8_000),
-                            efforts: vec!["low".into(), "medium".into(), "high".into()],
-                            default_effort: "medium".into(),
-                            sends_effort: true,
-                        },
-                        ModelCatalogEntry {
-                            id: "other-model".into(),
-                            context_window: Some(50_000),
-                            max_tokens: Some(4_000),
-                            efforts: vec!["low".into(), "high".into(), "max".into()],
-                            default_effort: "low".into(),
-                            sends_effort: true,
-                        },
-                    ],
-                },
-                ProviderCatalogEntry {
-                    name: "other-provider".into(),
-                    default_model: "foreign-model".into(),
-                    models: vec![ModelCatalogEntry {
-                        id: "foreign-model".into(),
-                        context_window: Some(32_000),
-                        max_tokens: None,
-                        efforts: vec!["medium".into()],
-                        default_effort: "medium".into(),
-                        sends_effort: false,
-                    }],
-                },
-            ],
-            reasoning_preferences: BTreeMap::from([(
-                "mock".into(),
-                BTreeMap::from([("other-model".into(), "high".into())]),
-            )]),
-            session_id: "12345678-1234-1234-1234-123456789abc".into(),
         };
-        (App::new(handle), evt_tx, cmd_rx, approval_rx)
+        let active_selection = ActiveModelSelection {
+            provider: "mock".into(),
+            model: "test-model".into(),
+            effort: "medium".into(),
+        };
+        let provider_catalog = vec![
+            ProviderCatalogEntry {
+                name: "mock".into(),
+                default_model: "test-model".into(),
+                models: vec![
+                    ModelCatalogEntry {
+                        id: "test-model".into(),
+                        context_window: Some(100_000),
+                        max_tokens: Some(8_000),
+                        efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        default_effort: "medium".into(),
+                        sends_effort: true,
+                    },
+                    ModelCatalogEntry {
+                        id: "other-model".into(),
+                        context_window: Some(50_000),
+                        max_tokens: Some(4_000),
+                        efforts: vec!["low".into(), "high".into(), "max".into()],
+                        default_effort: "low".into(),
+                        sends_effort: true,
+                    },
+                ],
+            },
+            ProviderCatalogEntry {
+                name: "other-provider".into(),
+                default_model: "foreign-model".into(),
+                models: vec![ModelCatalogEntry {
+                    id: "foreign-model".into(),
+                    context_window: Some(32_000),
+                    max_tokens: None,
+                    efforts: vec!["medium".into()],
+                    default_effort: "medium".into(),
+                    sends_effort: false,
+                }],
+            },
+        ];
+        let reasoning_preferences = BTreeMap::from([(
+            "mock".into(),
+            BTreeMap::from([("other-model".into(), "high".into())]),
+        )]);
+        (
+            App::new(
+                Box::new(runtime),
+                None,
+                "mock / test-model / effort=medium".into(),
+                active_selection,
+                provider_catalog,
+                reasoning_preferences,
+                "12345678-1234-1234-1234-123456789abc".into(),
+            ),
+            evt_tx,
+            cmd_rx,
+            approval_rx,
+        )
     }
 
     /// 完整过一遍事件流 + 输入操作 + 各种尺寸渲染,不允许 panic。

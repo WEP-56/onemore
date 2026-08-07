@@ -32,6 +32,8 @@ pub enum AgentCommand {
     Steer(String),
     /// 排队的后续任务:仅在当前任务将要停止时注入。空闲时等价于 UserInput。
     FollowUp(String),
+    /// 请求取消当前运行。SessionController 会先设置共享取消标志，命令用于完成终态关联。
+    Abort,
     /// 压缩当前会话:调模型生成摘要,作为 Compaction 事实追加
     /// (事实日志不减少,模型视图从摘要之后开始)。
     Compact,
@@ -41,6 +43,12 @@ pub enum AgentCommand {
     SwitchProvider(String),
     /// 在当前 provider 内原子选择模型与思考程度(/model)。
     SelectModel { model: String, effort: String },
+    /// SDK/RPC 原子选择 provider、model 与思考程度。
+    SetModelSelection {
+        provider: String,
+        model: String,
+        effort: String,
+    },
     /// 只调整当前模型的思考程度(/reasoning 或 /effort)。
     SetReasoningEffort(String),
     /// 列出当前 workspace 的历史会话(/session)。
@@ -49,6 +57,13 @@ pub enum AgentCommand {
     LoadSession(String),
     /// 退出:Runtime 线程收到后结束自己。活动运行中到达时会请求取消当前轮。
     Shutdown,
+}
+
+/// Stateful harness 中输入队列的分类。它只用于进程内事件，不承担 wire 语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputQueueKind {
+    Steering,
+    FollowUp,
 }
 
 /// Runtime → 前端。前端拿到的信息足以完整重建对话画面。
@@ -138,6 +153,16 @@ pub enum AgentEvent {
     SessionsListed {
         current_id: String,
         sessions: Vec<SessionSummary>,
+    },
+    /// Session runtime 已接纳输入并放入对应队列。
+    InputQueued {
+        command_id: String,
+        kind: InputQueueKind,
+        text: String,
+    },
+    /// 排队输入已提交为新的用户消息，不再属于 pending queue。
+    InputDequeued {
+        command_id: String,
     },
     /// 历史会话已载入；前端据此重建对话画面(含 Notice 等 UI-only 事实)。
     SessionLoaded {

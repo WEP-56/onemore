@@ -1,7 +1,6 @@
 //! Stateful command handling and model/context selection.
 
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::{ActiveModelSelection, Config, ProviderSettings};
 use crate::event::{AgentCommand, AgentEvent};
@@ -9,7 +8,14 @@ use crate::message::Usage;
 use crate::session::{ModelChangeRecord, SessionEntryPayload};
 use crate::workspace::Workspace;
 
+use super::agent_loop::RunReport;
+use super::inbox::CommandInbox;
 use super::{budget_from_settings, Agent, AgentBuilder};
+
+pub(super) struct HandleReport {
+    pub keep_running: bool,
+    pub run: Option<RunReport>,
+}
 
 impl Agent {
     pub fn builder(config: Config, workspace: Workspace) -> AgentBuilder {
@@ -54,31 +60,57 @@ impl Agent {
         emit: &mut dyn FnMut(AgentEvent),
         cancel: &AtomicBool,
     ) -> bool {
-        self.handle_command_with_inbox(cmd, emit, cancel, None)
+        self.handle_command_report(cmd, emit, cancel, None)
+            .keep_running
     }
 
     /// `inbox` 是命令通道的接收端:活动运行会在检查点(完整工具批之后、
     /// 任务将停止时)排干它,把新输入分类为 steering / follow-up,
     /// 把其余命令延迟到本轮结束(见 [`Agent::take_deferred`])。
-    pub fn handle_command_with_inbox(
+    #[cfg(test)]
+    pub(crate) fn handle_command_with_inbox(
         &mut self,
         cmd: AgentCommand,
         emit: &mut dyn FnMut(AgentEvent),
         cancel: &AtomicBool,
-        inbox: Option<&Receiver<AgentCommand>>,
+        inbox: Option<&dyn CommandInbox>,
     ) -> bool {
+        self.handle_command_report(cmd, emit, cancel, inbox)
+            .keep_running
+    }
+
+    pub(super) fn handle_command_report(
+        &mut self,
+        cmd: AgentCommand,
+        emit: &mut dyn FnMut(AgentEvent),
+        cancel: &AtomicBool,
+        inbox: Option<&dyn CommandInbox>,
+    ) -> HandleReport {
         self.emit_startup_events(emit);
         match cmd {
             // 空闲时三者等价:都开启一个新的运行。
             AgentCommand::UserInput(text)
             | AgentCommand::Steer(text)
             | AgentCommand::FollowUp(text) => {
-                self.run_turn(text, emit, cancel, inbox);
-                true
+                let run = self.run_turn(text, emit, cancel, inbox);
+                HandleReport {
+                    keep_running: !run.shutdown_requested,
+                    run: Some(run),
+                }
+            }
+            AgentCommand::Abort => {
+                cancel.store(true, Ordering::Relaxed);
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::Compact => {
                 self.compact(emit, cancel);
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::ClearConversation => {
                 match self.sessions.clear() {
@@ -90,14 +122,20 @@ impl Agent {
                     }
                     Err(e) => emit(AgentEvent::Error(format!("清空会话数据库失败: {:#}", e))),
                 }
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::SwitchProvider(name) => {
                 match self.preferred_default_selection(&name) {
                     Ok(selection) => self.apply_model_selection(selection, emit),
                     Err(error) => emit(AgentEvent::Error(format!("切换失败: {:#}", error))),
                 }
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::SelectModel { model, effort } => {
                 self.apply_model_selection(
@@ -108,13 +146,37 @@ impl Agent {
                     },
                     emit,
                 );
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
+            }
+            AgentCommand::SetModelSelection {
+                provider,
+                model,
+                effort,
+            } => {
+                self.apply_model_selection(
+                    ActiveModelSelection {
+                        provider,
+                        model,
+                        effort,
+                    },
+                    emit,
+                );
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::SetReasoningEffort(effort) => {
                 let mut selection = self.active_selection.clone();
                 selection.effort = effort;
                 self.apply_model_selection(selection, emit);
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::ListSessions => {
                 match self.sessions.list() {
@@ -124,7 +186,10 @@ impl Agent {
                     }),
                     Err(e) => emit(AgentEvent::Error(format!("读取会话列表失败: {:#}", e))),
                 }
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
             AgentCommand::LoadSession(id) => {
                 match self.sessions.load(&id) {
@@ -142,9 +207,15 @@ impl Agent {
                     }
                     Err(e) => emit(AgentEvent::Error(format!("恢复会话失败: {:#}", e))),
                 }
-                true
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
             }
-            AgentCommand::Shutdown => false,
+            AgentCommand::Shutdown => HandleReport {
+                keep_running: false,
+                run: None,
+            },
         }
     }
 

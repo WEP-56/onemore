@@ -1,19 +1,21 @@
 //! 可执行入口:参数解析、配置引导、装配 Agent,然后二选一:
 //! - 默认:Runtime 进工作线程 + TUI 前端;
 //! - `--once "提示词"`:headless 单轮模式,直接在当前线程跑完打印退出。
+//! - `--rpc`:严格 JSONL stdin/stdout 子进程协议。
 //!
 //! headless 模式的存在不只是为了方便调试:它和 TUI 消费**同一条事件流**,
 //! 证明 Runtime 与前端确实解耦(未来接 GUI/Web 就是再写一个消费者)。
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 
 use anyhow::{bail, Result};
 
 use onemore::config::{Config, EXAMPLE_CONFIG};
-use onemore::event::{AgentCommand, AgentEvent};
-use onemore::runtime::{self, Agent};
+use onemore::runtime::Agent;
+use onemore::sdk::{
+    ApprovalDecisionView, ApprovalResponseView, CommandStatus, ProgressEvent, SessionEvent,
+};
 use onemore::storage::AppPaths;
 use onemore::workspace::Workspace;
 
@@ -24,6 +26,7 @@ const HELP: &str = "Onemore —— 可靠、实用的 Coding Agent
 用法:
   onemore                     启动 TUI
   onemore --once <提示词...>   无界面跑一轮(方便调试/脚本化)
+  onemore --rpc               启动 JSONL RPC
 
 选项:
   -v, --version          显示版本
@@ -36,6 +39,7 @@ struct Args {
     config: PathBuf,
     provider: Option<String>,
     once: Option<String>,
+    rpc: bool,
     version: bool,
 }
 
@@ -43,6 +47,7 @@ fn parse_args(default_config: PathBuf) -> Result<Option<Args>> {
     let mut config = default_config;
     let mut provider = None;
     let mut once = None;
+    let mut rpc = false;
     let mut version = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -69,13 +74,18 @@ fn parse_args(default_config: PathBuf) -> Result<Option<Args>> {
                 }
                 once = Some(rest.join(" "));
             }
+            "--rpc" => rpc = true,
             other => bail!("未知参数 {:?},-h 查看用法", other),
         }
+    }
+    if rpc && once.is_some() {
+        bail!("--rpc 与 --once 不能同时使用");
     }
     Ok(Some(Args {
         config,
         provider,
         once,
+        rpc,
         version,
     }))
 }
@@ -98,10 +108,15 @@ fn main() -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&args.config, EXAMPLE_CONFIG)?;
-        println!(
+        let message = format!(
             "已生成 Onemore 配置模板 {}。\n填好 API key(或设置对应环境变量)后重新运行 onemore。",
             args.config.display()
         );
+        if args.rpc {
+            eprintln!("{}", message);
+        } else {
+            println!("{}", message);
+        }
         return Ok(());
     }
 
@@ -115,105 +130,118 @@ fn main() -> Result<()> {
     let workspace = Workspace::new(std::env::current_dir()?);
     let agent = Agent::new(cfg, workspace)?;
 
-    match args.once {
-        Some(prompt) => run_once(agent, prompt),
-        None => onemore::tui::run(runtime::spawn(agent)),
+    match (args.rpc, args.once) {
+        (true, None) => onemore::rpc::run(agent),
+        (false, Some(prompt)) => run_once(agent, prompt),
+        (false, None) => onemore::tui::run(onemore::sdk::spawn_session(agent)),
+        (true, Some(_)) => unreachable!("argument parser rejects --rpc with --once"),
     }
 }
 
 /// headless 前端:事件流直接打到终端。
 /// 助手正文走 stdout(方便管道),过程信息走 stderr。
-fn run_once(mut agent: Agent, prompt: String) -> Result<()> {
-    let cancel = AtomicBool::new(false);
+fn run_once(agent: Agent, prompt: String) -> Result<()> {
+    let mut session = onemore::sdk::spawn_session(agent);
+    let receipt = session.controller.prompt(prompt)?;
     let mut failed = false;
     let mut streamed = false;
-    {
-        let mut emit = |ev: AgentEvent| match ev {
-            AgentEvent::UserMessage(t) => eprintln!("❯ {}", t),
-            AgentEvent::AssistantDelta(t) => {
-                streamed = true;
-                print!("{}", t);
-                let _ = std::io::stdout().flush();
-            }
-            AgentEvent::AssistantMessage(_) if streamed => {
-                println!();
-                streamed = false;
-            }
-            AgentEvent::AssistantMessage(_) => {}
-            AgentEvent::ToolCallStarted { name, summary, .. } => {
-                eprintln!("● {}({})", name, summary);
-            }
-            AgentEvent::ToolCallUpdated { output, .. } => {
-                eprintln!("  … {}", onemore::util::ellipsis(output.ui_text(), 120));
-            }
-            AgentEvent::ToolCallFinished { output, error, .. } => {
-                let shown = output.ui_text();
-                let first = shown.lines().next().unwrap_or("");
-                let more = shown.lines().count().saturating_sub(1);
-                eprintln!(
-                    "  └ {}{}{}",
-                    if error.is_some() { "✖ " } else { "" },
-                    onemore::util::ellipsis(first, 120),
-                    if more > 0 {
-                        format!(" (+{} 行)", more)
-                    } else {
-                        String::new()
-                    }
-                );
-            }
-            AgentEvent::PermissionRequested { request } => {
-                eprintln!(
-                    "? {}({}) 需要审批: {}",
-                    request.tool, request.summary, request.reason
-                );
-            }
-            AgentEvent::PermissionResolved { allowed, .. } => {
-                eprintln!("  {}", if allowed { "已允许" } else { "未允许" });
-            }
-            AgentEvent::PlanUpdated {
-                revision,
-                items,
-                explanation,
-            } => {
-                eprintln!("· 计划 #{}", revision);
-                if let Some(explanation) = explanation {
-                    eprintln!("  {}", explanation);
+    loop {
+        match session.events.recv()? {
+            SessionEvent::Progress { progress } => match progress {
+                ProgressEvent::UserMessage { text } => eprintln!("❯ {}", text),
+                ProgressEvent::AssistantDelta { kind, delta, .. } if kind == "text" => {
+                    streamed = true;
+                    print!("{}", delta);
+                    let _ = std::io::stdout().flush();
                 }
-                for item in items {
-                    eprintln!("  [{}] {}: {}", item.status.as_str(), item.id, item.text);
+                ProgressEvent::AssistantFinished { text: _, .. } if streamed => {
+                    println!();
+                    streamed = false;
                 }
-            }
-            AgentEvent::SkillsDiscovered { skills, warnings } => {
-                if !skills.is_empty() {
-                    eprintln!("· 已发现 {} 个可用技能", skills.len());
+                ProgressEvent::AssistantFinished { text, .. } => println!("{}", text),
+                ProgressEvent::ToolStarted { name, summary, .. } => {
+                    eprintln!("● {}({})", name, summary);
                 }
-                for warning in warnings {
-                    eprintln!("· 技能发现警告: {}", warning);
+                ProgressEvent::ToolUpdated { output, .. } => {
+                    eprintln!("  … {}", onemore::util::ellipsis(&output, 120));
                 }
-            }
-            AgentEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cache,
-            } => {
-                if let Some(cache) = cache {
+                ProgressEvent::ToolFinished { output, error, .. } => {
+                    let shown = output.as_str();
+                    let first = shown.lines().next().unwrap_or("");
+                    let more = shown.lines().count().saturating_sub(1);
                     eprintln!(
-                        "· 用量 ↑{} ↓{} · cache read {} write {}",
-                        input_tokens, output_tokens, cache.read_tokens, cache.write_tokens
+                        "  └ {}{}{}",
+                        if error.is_some() { "✖ " } else { "" },
+                        onemore::util::ellipsis(first, 120),
+                        if more > 0 {
+                            format!(" (+{} 行)", more)
+                        } else {
+                            String::new()
+                        }
                     );
-                } else {
-                    eprintln!("· 用量 ↑{} ↓{}", input_tokens, output_tokens);
                 }
+                ProgressEvent::ApprovalRequested { request } => {
+                    eprintln!(
+                        "? {}({}) 需要审批: {}",
+                        request.tool, request.summary, request.reason
+                    );
+                    session
+                        .controller
+                        .respond_to_approval(ApprovalResponseView {
+                            request_id: request.request_id,
+                            decision: ApprovalDecisionView::Deny,
+                        })?;
+                }
+                ProgressEvent::ApprovalResolved { allowed, .. } => {
+                    eprintln!("  {}", if allowed { "已允许" } else { "未允许" });
+                }
+                ProgressEvent::PlanUpdated { plan } => {
+                    eprintln!("· 计划 #{}", plan.revision);
+                    if let Some(explanation) = plan.explanation {
+                        eprintln!("  {}", explanation);
+                    }
+                    for item in plan.items {
+                        eprintln!("  [{}] {}: {}", item.status.as_str(), item.id, item.text);
+                    }
+                }
+                ProgressEvent::SkillsDiscovered { skills, warnings } => {
+                    if !skills.is_empty() {
+                        eprintln!("· 已发现 {} 个可用技能", skills.len());
+                    }
+                    for warning in warnings {
+                        eprintln!("· 技能发现警告: {}", warning);
+                    }
+                }
+                ProgressEvent::Usage { usage } => {
+                    if usage.cache_read_tokens.is_some() || usage.cache_write_tokens.is_some() {
+                        eprintln!(
+                            "· 用量 ↑{} ↓{} · cache read {} write {}",
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_read_tokens.unwrap_or(0),
+                            usage.cache_write_tokens.unwrap_or(0)
+                        );
+                    } else {
+                        eprintln!("· 用量 ↑{} ↓{}", usage.input_tokens, usage.output_tokens);
+                    }
+                }
+                ProgressEvent::Notice { text, .. } => eprintln!("· {}", text),
+                ProgressEvent::Error { error } => {
+                    failed = true;
+                    eprintln!("✖ {}", error.message);
+                }
+                _ => {}
+            },
+            SessionEvent::CommandFinished {
+                command_id, status, ..
+            } if command_id == receipt.command_id => {
+                failed |= status == CommandStatus::Failed;
             }
-            AgentEvent::Notice(t) => eprintln!("· {}", t),
-            AgentEvent::Error(t) => {
-                failed = true;
-                eprintln!("✖ {}", t);
-            }
-            _ => {}
-        };
-        agent.handle_command(AgentCommand::UserInput(prompt), &mut emit, &cancel);
+            SessionEvent::Settled { .. } => break,
+            SessionEvent::SessionSnapshot { .. } | SessionEvent::CommandFinished { .. } => {}
+        }
     }
+    let _ = session.controller.shutdown();
     if failed {
         bail!("本轮出现错误");
     }
