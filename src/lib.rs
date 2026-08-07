@@ -5,11 +5,11 @@
 //! 2. [`workspace`] + [`tools`] —— 工具系统
 //! 3. [`context`] —— 上下文组装
 //! 4. [`provider`] —— 两种 API 的流式适配
-//! 5. [`event`] + [`runtime`] —— Agent Loop 与事件系统
+//! 5. [`event`] + [`runtime`] —— Agent Loop、命令与 stateful harness
 //! 6. [`storage`] —— 全局配置路径与 SQLite 会话持久化
 //! 7. [`tui`] —— 只是事件流的一个消费者
 //!
-//! 完整文档见 docs/ 目录(01-architecture.md 起)。
+//! Runtime 模块边界见 `docs/runtime-architecture.md`，其余设计文档见 `docs/`。
 
 pub mod config;
 pub mod context;

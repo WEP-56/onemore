@@ -26,7 +26,7 @@ use crate::message::ChatMessage;
 use crate::workspace::Workspace;
 
 /// 一轮请求最终的 prompt 形态:若干系统提示片段 + 消息列表。
-/// 各 API 适配器决定 system 落到哪个字段(system / messages[0] / instructions)。
+/// 各 API 适配器决定 system 落到哪个字段(system / messages\[0\] / instructions)。
 #[derive(Debug, Default, Clone)]
 pub struct PromptContext {
     pub system_sections: Vec<String>,

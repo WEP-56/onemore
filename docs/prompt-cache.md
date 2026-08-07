@@ -126,10 +126,12 @@ When a provider supports them, cache keys identify a prompt family, not a turn.
 They must not contain a message sequence number, timestamp, random UUID, or
 session ID.
 
-An appropriate key shape is:
+OpenAI limits cache keys to 64 characters, so the current key uses a truncated
+SHA-256 of the stable-prefix semantics instead of concatenating the model name
+and a full digest. Its shape is:
 
 ```text
-onemore:v1:<provider>:<model>:<workspace-policy>:<system>:<toolset>
+onemore:v1:<53 hexadecimal digest characters>
 ```
 
 Explicit breakpoints belong after content that is both large and expected to be

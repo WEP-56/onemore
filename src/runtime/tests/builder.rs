@@ -1,0 +1,241 @@
+use super::*;
+
+#[test]
+fn builder_defaults_match_legacy_constructor() {
+    let root = temp_root("builder-defaults");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let direct = Agent::new_with_data_dir(
+        multi_model_config(&root),
+        Workspace::new(workspace_root.clone()),
+        root.join("direct-data"),
+    )
+    .unwrap();
+    let built = Agent::builder(multi_model_config(&root), Workspace::new(workspace_root))
+        .data_dir(root.join("builder-data"))
+        .build()
+        .unwrap();
+
+    assert_eq!(direct.active_selection, built.active_selection);
+    assert_eq!(direct.provider_label(), built.provider_label());
+    assert_eq!(
+        direct
+            .tools
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>(),
+        built
+            .tools
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        direct.build_system_prompt().system_sections,
+        built.build_system_prompt().system_sections
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn provider_factory_is_reused_after_model_switch() {
+    let root = temp_root("provider-factory");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let created_models = Arc::new(Mutex::new(Vec::new()));
+    let factory_log = Arc::clone(&created_models);
+    let mut agent = Agent::builder(multi_model_config(&root), Workspace::new(workspace_root))
+        .data_dir(root.join("data"))
+        .provider_factory(move |settings| {
+            factory_log.lock().unwrap().push(settings.model);
+            Box::new(ScriptedProvider::new(Vec::new()))
+        })
+        .build()
+        .unwrap();
+
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::SelectModel {
+            model: "large".into(),
+            effort: "high".into(),
+        },
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+
+    assert_eq!(*created_models.lock().unwrap(), ["small", "large"]);
+    assert_eq!(agent.active_selection.model, "large");
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::ModelSelectionChanged { model, .. } if model == "large")
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn builder_injected_components_are_active() {
+    let root = temp_root("builder-components");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let retry_policy = RetryPolicy {
+        max_attempts: 7,
+        base_delay: Duration::from_millis(11),
+        max_delay: Duration::from_millis(22),
+        max_retry_after: Duration::from_millis(33),
+        jitter_seed: 44,
+    };
+    let denied = PermissionRules {
+        workspace_read: PermissionRule::Deny,
+        workspace_write: PermissionRule::Deny,
+        outside_workspace: PermissionRule::Deny,
+        opaque_side_effect: PermissionRule::Deny,
+    };
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut agent = Agent::builder(multi_model_config(&root), Workspace::new(workspace_root))
+        .data_dir(root.join("data"))
+        .tools(ToolRegistry::new(vec![Box::new(CountedTool {
+            executions,
+            capabilities: ToolCapabilities::READ_ONLY,
+            permission: ToolPermissionSpec::default(),
+        })]))
+        .context_providers(vec![Box::new(HostContext)])
+        .hooks(HookRegistry::new(vec![Box::new(PreventStopHook {
+            calls: Arc::clone(&hook_calls),
+        })]))
+        .permissions(PermissionManager::new(denied))
+        .retry_policy(retry_policy)
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        agent
+            .tools
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>(),
+        ["counted"]
+    );
+    assert_eq!(
+        agent.build_system_prompt().system_sections,
+        ["host context"]
+    );
+    let prepared = agent
+        .tools
+        .prepare("counted", &serde_json::json!({ "path": "file.txt" }))
+        .unwrap();
+    assert!(matches!(
+        agent.permissions.evaluate(&prepared, &agent.workspace),
+        PermissionDecision::Deny { .. }
+    ));
+    let stop = agent
+        .hooks
+        .run_stop(&ChatMessage::empty_assistant(), agent.sessions.current_id());
+    assert_eq!(
+        stop.prevent_stop.as_deref(),
+        Some("Hook verify_once: run verification")
+    );
+    assert_eq!(hook_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(agent.retry_policy.max_attempts, 7);
+    assert_eq!(agent.retry_policy.jitter_seed, 44);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn startup_emits_frozen_skill_catalog_once() {
+    let root = temp_root("skills-event");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(workspace_root.join(".onemore/skills/demo")).unwrap();
+    std::fs::write(
+        workspace_root.join(".onemore/skills/demo/SKILL.md"),
+        "---\nname: demo\ndescription: demo skill\n---\nbody",
+    )
+    .unwrap();
+    let mut agent = Agent::new_with_data_dir(
+        multi_model_config(&root),
+        Workspace::new(workspace_root),
+        root.join("data"),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::ListSessions,
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::SkillsDiscovered { skills, warnings })
+            if skills.iter().any(|skill| skill.name == "demo") && warnings.is_empty()
+    ));
+    events.clear();
+    agent.handle_command(
+        AgentCommand::ListSessions,
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::SkillsDiscovered { .. })));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_selection_updates_budget_records_one_fact_and_persists_effort() {
+    let root = temp_root("model-selection");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let data_dir = root.join("data");
+    let mut agent = Agent::new_with_data_dir(
+        multi_model_config(&root),
+        Workspace::new(workspace_root.clone()),
+        data_dir.clone(),
+    )
+    .unwrap();
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::SelectModel {
+            model: "large".into(),
+            effort: "high".into(),
+        },
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+
+    assert_eq!(agent.active_selection.model, "large");
+    assert_eq!(agent.active_selection.effort, "high");
+    assert_eq!(agent.budget.context_window, Some(200000));
+    assert_eq!(agent.budget.reserve_output, 32000);
+    assert_eq!(
+        agent
+            .entries
+            .iter()
+            .filter(|entry| matches!(&entry.payload, SessionEntryPayload::ModelChange(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ModelSelectionChanged { .. }))
+            .count(),
+        1
+    );
+
+    let restarted = Agent::new_with_data_dir(
+        multi_model_config(&root),
+        Workspace::new(workspace_root),
+        data_dir,
+    )
+    .unwrap();
+    // 新启动仍从 provider 默认模型开始；偏好是按模型保存的，不会泄漏到 small。
+    assert_eq!(restarted.active_selection.model, "small");
+    assert_eq!(restarted.active_selection.effort, DEFAULT_REASONING_EFFORT);
+    assert_eq!(
+        restarted.workspace_preferences.effort("mock", "large"),
+        Some("high")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

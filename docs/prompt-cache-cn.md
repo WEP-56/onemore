@@ -138,10 +138,11 @@ Cache Key 中不得包含：
 - 随机 UUID；
 - Session ID。
 
-合适的 Key 结构如下：
+OpenAI 将 Cache Key 限制为 64 个字符，因此当前 Key 使用稳定前缀语义的
+截断 SHA-256，而不是直接拼接模型名和完整摘要。结构如下：
 
 ```text
-onemore:v1:<provider>:<model>:<workspace-policy>:<system>:<toolset>
+onemore:v1:<53 个十六进制摘要字符>
 ```
 
 显式缓存断点应放在同时满足以下条件的内容之后：

@@ -250,6 +250,13 @@ pub fn project_model_messages(entries: &[SessionEntry]) -> ModelProjection {
                 tail_chars_after_baseline += message_chars(&message);
                 messages.push(message);
             }
+            SessionEntryPayload::ModelChange(_) => {
+                // Provider token counts are not portable across models or
+                // tokenizers. Fall back to a full estimate until the newly
+                // selected model supplies its own assistant usage baseline.
+                known_token_baseline = None;
+                tail_chars_after_baseline = messages.iter().map(message_chars).sum();
+            }
             _ => {}
         }
     }
@@ -458,6 +465,51 @@ mod tests {
         assert_eq!(projection.messages.len(), 2);
         assert!(projection.messages[0].text().contains("old task summary"));
         assert_eq!(projection.messages[1].text(), "new fact");
+    }
+
+    #[test]
+    fn model_change_invalidates_usage_baseline_until_the_new_model_responds() {
+        let old_usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cache: None,
+        };
+        let entries = vec![
+            entry(SessionEntryPayload::message(
+                ChatMessage {
+                    role: Role::Assistant,
+                    blocks: vec![Block::Text("old model answer".into())],
+                },
+                Some(old_usage),
+            )),
+            entry(SessionEntryPayload::ModelChange(ModelChangeRecord {
+                provider: "next".into(),
+                model: "next-model".into(),
+                effort: "medium".into(),
+            })),
+            entry(SessionEntryPayload::message(
+                ChatMessage::user_text("question for the new model"),
+                None,
+            )),
+        ];
+
+        let projection = project_model_messages(&entries);
+        assert_eq!(projection.known_token_baseline, None);
+
+        let mut with_new_usage = entries;
+        with_new_usage.push(entry(SessionEntryPayload::message(
+            ChatMessage {
+                role: Role::Assistant,
+                blocks: vec![Block::Text("new model answer".into())],
+            },
+            Some(Usage {
+                input_tokens: 200,
+                output_tokens: 20,
+                cache: None,
+            }),
+        )));
+        let projection = project_model_messages(&with_new_usage);
+        assert_eq!(projection.known_token_baseline, Some(220));
     }
 
     #[test]

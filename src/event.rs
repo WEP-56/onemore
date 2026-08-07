@@ -1,8 +1,8 @@
 //! # 事件系统:Runtime 与前端之间的唯一契约
 //!
 //! Agent Loop **从不直接操作 TUI**。它只会:
-//! - 从命令通道收 [`AgentCommand`](用户想干什么);
-//! - 往事件通道发 [`AgentEvent`](世界发生了什么)。
+//! - 从命令通道收 [`AgentCommand`]（用户想干什么）;
+//! - 往事件通道发 [`AgentEvent`]（世界发生了什么）。
 //!
 //! 前端(TUI、`--once` headless 打印器,未来的 GUI/Web)只做一件事:
 //! 消费事件流并渲染。本项目自带两个前端消费同一事件流,
@@ -46,7 +46,7 @@ pub enum AgentCommand {
     SetReasoningEffort(String),
     /// 列出当前 workspace 的历史会话(/session)。
     ListSessions,
-    /// 恢复当前 workspace 的一个历史会话(/session <id>)。
+    /// 恢复当前 workspace 的一个历史会话(`/session <id>`)。
     LoadSession(String),
     /// 退出:Runtime 线程收到后结束自己。活动运行中到达时会请求取消当前轮。
     Shutdown,

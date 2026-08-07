@@ -326,8 +326,10 @@ impl ResponsesProvider {
                 break;
             };
             if ev.data == "[DONE]" {
-                saw_terminal = true;
-                break;
+                // Responses requires response.completed/incomplete/failed.
+                // The legacy marker alone carries no status or usage and must
+                // not make a truncated stream look successful.
+                continue;
             }
             let data: Value = serde_json::from_str(&ev.data)
                 .map_err(|e| ProviderError::fatal(format!("流事件 JSON 无效: {}", e)))?;
@@ -398,7 +400,7 @@ impl ResponsesProvider {
                         blocks.push(b);
                     }
                 }
-                "response.completed" | "response.incomplete" => {
+                "response.completed" => {
                     saw_terminal = true;
                     let resp = &data["response"];
                     if let Some(u) = resp.get("usage").filter(|u| !u.is_null()) {
@@ -406,16 +408,23 @@ impl ResponsesProvider {
                         usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
                         usage.cache = cache_usage(u);
                     }
-                    if data["type"] == "response.incomplete" {
-                        let reason = resp["incomplete_details"]["reason"]
-                            .as_str()
-                            .unwrap_or("incomplete");
-                        stop = Some(if reason == "max_output_tokens" {
-                            StopReason::MaxTokens
-                        } else {
-                            StopReason::Other(reason.to_string())
-                        });
+                    break;
+                }
+                "response.incomplete" => {
+                    let resp = &data["response"];
+                    let reason = resp["incomplete_details"]["reason"]
+                        .as_str()
+                        .unwrap_or("unknown");
+                    if reason != "max_output_tokens" {
+                        return Err(ProviderError::fatal(format!("响应未完成: {}", reason)));
                     }
+                    saw_terminal = true;
+                    if let Some(u) = resp.get("usage").filter(|u| !u.is_null()) {
+                        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+                        usage.cache = cache_usage(u);
+                    }
+                    stop = Some(StopReason::MaxTokens);
                     break;
                 }
                 "response.failed" => {
@@ -541,10 +550,9 @@ mod tests {
 
         assert_eq!(body["instructions"], "sys");
         assert_eq!(body["store"], false);
-        assert!(body["prompt_cache_key"]
-            .as_str()
-            .unwrap()
-            .starts_with("onemore:v1:openai-responses:"));
+        let cache_key = body["prompt_cache_key"].as_str().unwrap();
+        assert!(cache_key.starts_with("onemore:v1:"));
+        assert_eq!(cache_key.chars().count(), 64);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["content"][0]["type"], "input_text");

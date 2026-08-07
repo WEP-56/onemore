@@ -1,4 +1,4 @@
-//! Anthropic Messages API 适配器(https://docs.anthropic.com/en/api/messages)。
+//! Anthropic Messages API 适配器(<https://docs.anthropic.com/en/api/messages>)。
 //!
 //! 统一模型与它几乎一一对应(内部模型就是照它设计的),要点只有三个:
 //! - `max_tokens` 是**必填**字段(另两家可省略),没配就用默认值;
@@ -255,8 +255,10 @@ impl AnthropicProvider {
                 break;
             };
             if ev.data == "[DONE]" {
-                saw_terminal = true;
-                break;
+                // Messages is complete only after message_stop. Some proxies
+                // append the legacy marker, but it must not turn a truncated
+                // stream into a successful assistant message.
+                continue;
             }
             let data: Value = serde_json::from_str(&ev.data)
                 .map_err(|e| ProviderError::fatal(format!("流事件 JSON 无效: {}", e)))?;

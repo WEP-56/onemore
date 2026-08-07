@@ -2,6 +2,7 @@
 
 ## Design Documents
 
+- [Runtime 结构与弱 Harness 边界](docs/runtime-architecture.md)
 - [提示词缓存设计](docs/prompt-cache.md)
 - [API 兼容性与 Chat Completions 删除](docs/api-compatibility.md)
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
@@ -26,6 +27,44 @@ cargo run
 ```
 
 配置样例见 `config.example.toml`. 本地 `config.toml` 可能包含 API key,已被 Git 忽略。
+
+## 作为库嵌入
+
+`Agent::new` 保留 CLI 的完整默认装配；宿主也可以从 `Agent::builder` 只替换需要接管的
+组件。Provider 使用持久 factory，而不是一次性的实例，因此 `/provider` 和 `/model`
+切换后仍会走宿主实现。
+
+```rust
+use std::path::PathBuf;
+
+use onemore::config::{Config, ProviderSettings};
+use onemore::context::ContextProvider;
+use onemore::provider::Provider;
+use onemore::runtime::{Agent, RetryPolicy};
+use onemore::tools::ToolRegistry;
+use onemore::workspace::Workspace;
+
+fn embedded_agent(
+    config: Config,
+    workspace: Workspace,
+    data_dir: PathBuf,
+    provider_factory: impl Fn(ProviderSettings) -> Box<dyn Provider> + Send + Sync + 'static,
+    tools: ToolRegistry,
+    context: Vec<Box<dyn ContextProvider>>,
+) -> anyhow::Result<Agent> {
+    Agent::builder(config, workspace)
+        .data_dir(data_dir)
+        .provider_factory(provider_factory)
+        .tools(tools)
+        .context_providers(context)
+        .retry_policy(RetryPolicy::default())
+        .build()
+}
+```
+
+当前这是 stateful harness 的组合边界，不是最终的纯 agent loop：SQLite session、workspace
+偏好和 skills discovery 仍由 builder 建立。具体模块职责与剩余边界见
+[Runtime 结构与弱 Harness 边界](docs/runtime-architecture.md)。
 
 TUI 内常用操作:
 
@@ -220,7 +259,7 @@ npm install -g onemore-agent
 
 ```powershell
 cargo fmt --check
-cargo test --locked          # 140 单测 + 5 wire 测试
+cargo test --locked          # 单元测试 + wire 协议测试
 cargo build --release --locked
 .\scripts\package-npm.ps1 -Pack
 ```

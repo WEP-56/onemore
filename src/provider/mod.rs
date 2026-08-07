@@ -244,12 +244,14 @@ pub(crate) fn prompt_cache_key(
         "system": prompt.system_text(),
         "tools": canonical_tools(tools),
     });
-    format!(
-        "onemore:v1:{}:{}:{}",
-        profile_id(profile),
-        model,
-        sha256_hex(&stable_prefix)
-    )
+    // OpenAI limits prompt_cache_key to 64 characters. Keep the readable
+    // version marker and use 212 bits of the semantic-prefix hash; truncating
+    // the previous readable form would discard most of the hash and make
+    // different system/tool prefixes collide for the same model.
+    const KEY_PREFIX: &str = "onemore:v1:";
+    const HASH_CHARS: usize = 64 - KEY_PREFIX.len();
+    let hash = sha256_hex(&stable_prefix);
+    format!("{}{}", KEY_PREFIX, &hash[..HASH_CHARS])
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +481,10 @@ mod tests {
         first.messages.push(ChatMessage::user_text("first turn"));
         let mut second = first.clone();
         second.messages.push(ChatMessage::user_text("second turn"));
+        let mut different_prefix = first.clone();
+        different_prefix
+            .system_sections
+            .push("different policy".into());
         let tools = vec![tool("zeta"), tool("alpha")];
         let reversed = vec![tool("alpha"), tool("zeta")];
 
@@ -521,13 +527,25 @@ mod tests {
                 &tools,
             )
         );
+        let cache_key =
+            prompt_cache_key(ProviderProfile::OpenAiResponses, "gpt-test", &first, &tools);
+        assert_eq!(cache_key.chars().count(), 64);
         assert_eq!(
-            prompt_cache_key(ProviderProfile::OpenAiResponses, "gpt-test", &first, &tools,),
+            cache_key,
             prompt_cache_key(
                 ProviderProfile::OpenAiResponses,
                 "gpt-test",
                 &second,
                 &reversed,
+            )
+        );
+        assert_ne!(
+            cache_key,
+            prompt_cache_key(
+                ProviderProfile::OpenAiResponses,
+                "gpt-test",
+                &different_prefix,
+                &tools,
             )
         );
     }

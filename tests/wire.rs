@@ -356,10 +356,9 @@ fn responses_full_tool_roundtrip() {
     let first_body = server.body(0);
     let body = server.body(1);
     assert_eq!(first_body["prompt_cache_key"], body["prompt_cache_key"]);
-    assert!(body["prompt_cache_key"]
-        .as_str()
-        .unwrap()
-        .starts_with("onemore:v1:openai-responses:"));
+    let cache_key = body["prompt_cache_key"].as_str().unwrap();
+    assert!(cache_key.starts_with("onemore:v1:"));
+    assert_eq!(cache_key.chars().count(), 64);
     assert_eq!(body["store"], false);
     assert!(body["instructions"].as_str().unwrap().contains("Onemore"));
     let input = body["input"].as_array().unwrap();
@@ -483,5 +482,55 @@ fn responses_eof_before_terminal_is_an_error() {
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::TurnFinished { cancelled: false })));
+    server.finish();
+}
+
+#[test]
+fn anthropic_done_marker_before_message_stop_is_an_error() {
+    let response = concat!(
+        "event: message_start\n",
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    )
+    .to_string();
+    let server = MockServer::start(vec![response]);
+    let events = run_agent_against("messages", server.port);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("终止事件"))));
+    server.finish();
+}
+
+#[test]
+fn responses_done_marker_before_terminal_is_an_error() {
+    let response = concat!(
+        "event: response.created\n",
+        r#"data: {"type":"response.created","response":{"id":"done-only"}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    )
+    .to_string();
+    let server = MockServer::start(vec![response]);
+    let events = run_agent_against("responses", server.port);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Error(message) if message.contains("terminal"))));
+    server.finish();
+}
+
+#[test]
+fn responses_non_length_incomplete_is_an_error() {
+    let response = concat!(
+        "event: response.incomplete\n",
+        r#"data: {"type":"response.incomplete","response":{"id":"filtered","status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":5,"output_tokens":0}}}"#,
+        "\n\n",
+    )
+    .to_string();
+    let server = MockServer::start(vec![response]);
+    let events = run_agent_against("responses", server.port);
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::Error(message) if message.contains("content_filter"))
+    ));
     server.finish();
 }
