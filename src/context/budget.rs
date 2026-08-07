@@ -14,6 +14,7 @@
 
 use crate::message::{Block, ChatMessage, Role};
 use crate::session::{message_chars, ModelProjection};
+use crate::tools::ToolSpec;
 
 /// 折叠旧 ToolResult 时保留的正文头部字符数。
 const SHORTENED_RESULT_HEAD_CHARS: usize = 160;
@@ -37,7 +38,7 @@ impl ContextBudget {
     }
 
     /// 可用于输入侧的 token 预算。
-    fn available_input(&self) -> Option<u64> {
+    pub(crate) fn available_input(&self) -> Option<u64> {
         self.context_window
             .map(|window| window.saturating_sub(self.reserve_output).max(1))
     }
@@ -72,6 +73,18 @@ pub fn estimate_tokens(system_chars: u64, tools_chars: u64, projection: &ModelPr
             chars_to_tokens(system_chars + tools_chars + message_total)
         }
     }
+}
+
+pub(crate) fn tool_spec_chars(specs: &[ToolSpec]) -> u64 {
+    specs
+        .iter()
+        .map(|spec| {
+            (spec.name.chars().count()
+                + spec.description.chars().count()
+                + spec.schema.to_string().chars().count()
+                + 32) as u64
+        })
+        .sum()
 }
 
 pub fn apply_budget(

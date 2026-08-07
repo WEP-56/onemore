@@ -74,6 +74,7 @@ fn over_budget_refuses_to_call_provider() {
         context_window: Some(100),
         reserve_output: 50,
     };
+    agent.compaction_settings.enabled = false;
     let mut events = Vec::new();
     agent.handle_command(
         AgentCommand::UserInput("长输入".repeat(2000)),

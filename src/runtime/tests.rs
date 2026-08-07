@@ -313,6 +313,7 @@ fn install_counted_tool(
 }
 
 mod builder;
+mod compaction;
 mod concurrency;
 mod history;
 mod permissions;

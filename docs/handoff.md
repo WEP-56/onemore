@@ -260,33 +260,44 @@ $env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
 git diff --check
 ```
 
+## 当前阶段：自动上下文压缩已完成
+
+- 新增公开 `CompactionSettings` 与 Builder/`[compaction]` 配置，默认自动启用，也可关闭；
+  阈值按正常输入预算减 `reserve_tokens` 计算，`keep_recent_tokens` 控制保留尾部。
+- 手动 `/compact` 与请求前自动触发共用 `runtime::compaction::CompactionRuntime`，没有第二套
+  摘要或持久化实现；摘要请求继续是零工具、单条纯文本 user 消息。
+- `CompactionRecord` 直接收敛为 summary、tokens_before、retained_messages；模型投影从最新
+  摘要、保留尾部和后续事实重建，原始事实不删除、不改写。
+- 确定性切分不会从 ToolResult 开始 retained tail；SessionBackend 提交边界再次校验尾部
+  ToolUse/ToolResult 闭合。摘要失败、取消或原子提交失败都不追加 Compaction 事实。
+- 自动压缩成功后在同一 core loop 内重新投影并执行原有硬预算检查；关闭自动触发时仍保留
+  原有工具结果折叠与明确拒绝行为。
+- 回归测试已按职责迁到 `src/runtime/tests/compaction.rs`，覆盖成功、纯文本请求、关闭、失败、
+  取消、持久化失败、retained tail 和 append-only 行为。
+
+本阶段完整验收结果：
+
+```text
+cargo test --locked
+  175 unit tests passed
+  8 wire tests passed
+
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all --check
+$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
+git diff --check
+```
+
 ## 下一会话工作顺序
 
-任务一的首批工作已经完成：根目录 `AGENTS.md`、基础 identity、plan 使用时机、专用工具
-优先规则和默认 prompt section 顺序均已落地。仓库根目录现在也包含中文 `AGENTS.md`，新
-Agent 会话启动时会通过本阶段新增的 production provider 自动加载它。
-
-下一会话从任务二开始：
-
-### 1. 自动上下文压缩
-
-- 在现有手动 `/compact` 的唯一生产路径上增加自动触发，不复制第二套压缩实现。
-- 自动压缩必须可配置、可关闭，并能用确定性测试控制阈值和模型响应。
-- 切分点不得拆开 ToolUse/ToolResult；压缩失败、取消或持久化失败时不得推进内存事实。
-- 原始事实日志继续 append-only；摘要只改变模型投影，不删除或改写历史事实。
-- 保留已有纯文本摘要请求，避免向无工具请求回传结构化 tool/reasoning 历史。
-- 优先阅读：`src/runtime/compaction.rs`、`src/context/budget.rs`、`src/session.rs`、
-  `src/runtime/agent_loop.rs`、`src/runtime/tests/history.rs`，并对照
-  `example/pi/packages/agent/src/harness/compaction/compaction.ts`。
-
-### 2. RPC / SDK 外部连接协议
+### 1. RPC / SDK 外部连接协议
 
 - 自动压缩稳定后，参考 Pi RPC 模式定义可长期维护的外部协议。
 - 其他进程应能驱动 agent、发送 steering/follow-up、接收流式事件并完成审批往返。
 - 协议层只依赖稳定 SDK 边界，不泄漏 TUI、SQLite 或默认 CLI 组件；CLI 与外部连接必须
   驱动同一条 `run_agent_loop` 生产路径。
 
-### 3. 轻量插件协议
+### 2. 轻量插件协议
 
 - 仅在 SDK 边界稳定后设计。
 - 第一版只覆盖真实扩展点：tools、context、hooks、model registry；避免提前引入复杂生命周期、

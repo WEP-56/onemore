@@ -13,6 +13,12 @@ max_turns = 50
 # 想完全接管系统提示就取消下面的注释:
 # system_prompt = "You are ..."
 
+# 自动压缩在正常输入预算前预留一段余量，并原样保留最近消息。
+[compaction]
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+
 # 权限规则:allow | ask | deny。hard deny(设备路径、无法安全解析的路径)不受这里覆盖。
 [permissions]
 workspace_read = "allow"

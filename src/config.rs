@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::compaction::{CompactionSettings, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS};
 use crate::harness::ModelRegistry;
 use crate::permission::{PermissionRule, PermissionRules};
 
@@ -149,9 +150,22 @@ pub struct ProviderSettings {
 struct FileConfig {
     agent: AgentSection,
     #[serde(default)]
+    compaction: CompactionSection,
+    #[serde(default)]
     permissions: PermissionsSection,
     #[serde(default)]
     providers: BTreeMap<String, RawProviderSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CompactionSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    reserve_tokens: Option<u64>,
+    #[serde(default)]
+    keep_recent_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -289,6 +303,7 @@ pub struct Config {
     pub max_turns: u32,
     /// 单个工具调用的执行超时(None = 不限制;run_command 另有自己的超时)。
     pub tool_timeout: Option<std::time::Duration>,
+    pub compaction: CompactionSettings,
     pub permission_rules: PermissionRules,
     providers: BTreeMap<String, ProviderSection>,
 }
@@ -309,6 +324,18 @@ impl Config {
                 raw.providers.keys().cloned().collect::<Vec<_>>().join(", ")
             );
         }
+        let compaction = CompactionSettings {
+            enabled: raw.compaction.enabled.unwrap_or(true),
+            reserve_tokens: raw
+                .compaction
+                .reserve_tokens
+                .unwrap_or(DEFAULT_RESERVE_TOKENS),
+            keep_recent_tokens: raw
+                .compaction
+                .keep_recent_tokens
+                .unwrap_or(DEFAULT_KEEP_RECENT_TOKENS),
+        };
+        compaction.validate()?;
         let providers = raw
             .providers
             .into_iter()
@@ -360,6 +387,7 @@ impl Config {
                 .tool_timeout_secs
                 .filter(|secs| *secs > 0)
                 .map(std::time::Duration::from_secs),
+            compaction,
             permission_rules,
             providers,
         })
@@ -772,6 +800,12 @@ max_turns = 50
 # tool_timeout_secs = 300
 # 想完全接管系统提示就取消下面的注释:
 # system_prompt = "You are ..."
+
+# 自动压缩在正常输入预算前预留一段余量，并原样保留最近消息。
+[compaction]
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
 
 # 权限规则:allow | ask | deny。hard deny(设备路径、无法安全解析的路径)不受这里覆盖。
 [permissions]

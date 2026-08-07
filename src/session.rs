@@ -114,6 +114,7 @@ impl ArtifactDraft {
 pub struct CompactionRecord {
     pub summary: String,
     pub tokens_before: u64,
+    pub retained_messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +233,10 @@ pub fn project_model_messages(entries: &[SessionEntry]) -> ModelProjection {
                 ));
                 tail_chars_after_baseline += message_chars(&summary);
                 messages.push(summary);
+                for retained in &compaction.retained_messages {
+                    tail_chars_after_baseline += message_chars(retained);
+                    messages.push(retained.clone());
+                }
             }
             index + 1
         }
@@ -366,13 +371,29 @@ fn missing_tool_result(id: &str) -> Block {
 }
 
 pub fn validate_new_message_batch(payloads: &[SessionEntryPayload]) -> Result<(), String> {
+    for payload in payloads {
+        if let SessionEntryPayload::Compaction(compaction) = payload {
+            validate_tool_pairs(&compaction.retained_messages)?;
+        }
+    }
+    let messages: Vec<&ChatMessage> = payloads
+        .iter()
+        .filter_map(|payload| match payload {
+            SessionEntryPayload::Message(record) => Some(&record.message),
+            _ => None,
+        })
+        .collect();
+    validate_tool_pairs(&messages)
+}
+
+fn validate_tool_pairs<M>(messages: &[M]) -> Result<(), String>
+where
+    M: std::borrow::Borrow<ChatMessage>,
+{
     let mut uses = HashMap::new();
     let mut results = HashMap::new();
-    for payload in payloads {
-        let SessionEntryPayload::Message(record) = payload else {
-            continue;
-        };
-        for block in &record.message.blocks {
+    for message in messages {
+        for block in &message.borrow().blocks {
             match block {
                 Block::ToolUse { id, .. } => {
                     *uses.entry(id.as_str()).or_insert(0usize) += 1;
@@ -464,6 +485,7 @@ mod tests {
             entry(SessionEntryPayload::Compaction(CompactionRecord {
                 summary: "old task summary".into(),
                 tokens_before: 100,
+                retained_messages: vec![ChatMessage::user_text("retained fact")],
             })),
             entry(SessionEntryPayload::message(
                 ChatMessage::user_text("new fact"),
@@ -472,9 +494,10 @@ mod tests {
         ];
         let projection = project_model_messages(&entries);
         assert_eq!(entries.len(), 3);
-        assert_eq!(projection.messages.len(), 2);
+        assert_eq!(projection.messages.len(), 3);
         assert!(projection.messages[0].text().contains("old task summary"));
-        assert_eq!(projection.messages[1].text(), "new fact");
+        assert_eq!(projection.messages[1].text(), "retained fact");
+        assert_eq!(projection.messages[2].text(), "new fact");
     }
 
     #[test]
@@ -558,5 +581,22 @@ mod tests {
             None,
         );
         assert!(validate_new_message_batch(&[assistant]).is_err());
+    }
+
+    #[test]
+    fn compaction_retained_tail_rejects_orphan_tool_results() {
+        let compaction = SessionEntryPayload::Compaction(CompactionRecord {
+            summary: "summary".into(),
+            tokens_before: 100,
+            retained_messages: vec![ChatMessage {
+                role: Role::User,
+                blocks: vec![Block::ToolResult {
+                    tool_use_id: "orphan".into(),
+                    content: "result".into(),
+                    is_error: false,
+                }],
+            }],
+        });
+        assert!(validate_new_message_batch(&[compaction]).is_err());
     }
 }

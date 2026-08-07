@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::compaction::CompactionSettings;
 use crate::config::{Config, ProviderSettings};
 use crate::context::instructions::Instructions;
 use crate::context::project_instructions::ProjectInstructions;
@@ -59,6 +60,7 @@ pub struct AgentBuilder {
     permissions: Option<PermissionManager>,
     hooks: Option<HookRegistry>,
     retry_policy: RetryPolicy,
+    compaction_settings: CompactionSettings,
 }
 
 impl AgentBuilder {
@@ -67,12 +69,14 @@ impl AgentBuilder {
         let system_prompt = config.system_prompt.clone();
         let max_turns = config.max_turns;
         let tool_timeout = config.tool_timeout;
+        let compaction_settings = config.compaction;
         let permission_rules = config.permission_rules;
         let mut builder = Self::with_models(Box::new(config), workspace);
         builder.shell = shell;
         builder.system_prompt = system_prompt;
         builder.max_turns = max_turns;
         builder.tool_timeout = tool_timeout;
+        builder.compaction_settings = compaction_settings;
         builder.permission_rules = permission_rules;
         builder
     }
@@ -110,6 +114,7 @@ impl AgentBuilder {
             permissions: None,
             hooks: None,
             retry_policy: RetryPolicy::default(),
+            compaction_settings: CompactionSettings::default(),
         }
     }
 
@@ -221,10 +226,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Configure or disable automatic compaction for the stateful harness.
+    pub fn compaction(mut self, settings: CompactionSettings) -> Self {
+        self.compaction_settings = settings;
+        self
+    }
+
     pub fn build(self) -> anyhow::Result<Agent> {
         if self.max_turns == 0 {
             anyhow::bail!("max_turns 必须大于 0");
         }
+        self.compaction_settings.validate()?;
         let needs_paths = self.session_backend.is_none()
             || self.model_preferences.is_none()
             || matches!(self.skills, SkillsMode::Discover);
@@ -341,6 +353,7 @@ impl AgentBuilder {
             provider_factory: self.provider_factory,
             active_selection,
             budget,
+            compaction_settings: self.compaction_settings,
             retry_policy: self.retry_policy,
             models: self.models,
             max_turns: self.max_turns,

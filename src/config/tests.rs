@@ -30,6 +30,45 @@ fn bundled_example_matches_checked_in_file() {
 }
 
 #[test]
+fn compaction_settings_have_defaults_and_allow_an_explicit_disable() {
+    let default = load_config(
+        r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert!(default.compaction.enabled);
+    assert_eq!(default.compaction.reserve_tokens, 16_384);
+    assert_eq!(default.compaction.keep_recent_tokens, 20_000);
+
+    let disabled = load_config(
+        r#"
+[agent]
+provider = "mock"
+[compaction]
+enabled = false
+reserve_tokens = 1234
+keep_recent_tokens = 5678
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert!(!disabled.compaction.enabled);
+    assert_eq!(disabled.compaction.reserve_tokens, 1234);
+    assert_eq!(disabled.compaction.keep_recent_tokens, 5678);
+}
+
+#[test]
 fn permission_rules_reject_unknown_values() {
     assert_eq!(
         parse_permission_rule(Some("deny"), PermissionRule::Allow, "commands").unwrap(),
@@ -263,6 +302,15 @@ context_window = 32000
 
     let zero_turns = invalid_shell.replace("shell = \"bash\"", "max_turns = 0");
     assert!(format!("{:#}", load_config(&zero_turns).unwrap_err()).contains("max_turns"));
+
+    let zero_compaction_reserve = invalid_shell.replace("shell = \"bash\"", "").replace(
+        "[providers.mock]",
+        "[compaction]\nreserve_tokens = 0\n[providers.mock]",
+    );
+    assert!(
+        format!("{:#}", load_config(&zero_compaction_reserve).unwrap_err())
+            .contains("compaction.reserve_tokens")
+    );
 
     let duplicate_key_sources = r#"
 [agent]

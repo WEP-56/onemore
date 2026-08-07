@@ -168,9 +168,9 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
 - 模型看到什么由**单向投影**决定:UI-only 事实不进 Provider;投影时对旧库
   损坏数据做防御性工具配对修复并发出诊断。`/session` 恢复的是完整事实。
 - 上下文预算(配置 `context_window` 后启用):优先用最近一条 assistant 的
-  真实 usage 作基线、只估算其后尾部;超预算先在本轮视图中折叠旧 ToolResult
-  (事实不动、配对不拆),仍超预算则**明确拒绝发请求**并提示 `/compact`,
-  绝不静默删消息。`/compact` 生成的摘要是新增事实,压缩后事实条数只增不减。
+  真实 usage 作基线、只估算其后尾部。达到可配置阈值时自动复用 `/compact` 的唯一
+  生产路径，摘要旧前缀并原样保留最近消息；切分不拆 ToolUse/ToolResult，事实日志只追加。
+  自动压缩关闭时，硬预算仍会先折叠旧 ToolResult，仍超限则明确拒绝发请求。
 
 ### 5. 运行时:ActiveRun 与两个输入队列(阶段 5)
 
@@ -229,8 +229,7 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
 
 ### 尚未实现
 
-MCP、持久 Background/Task 系统、子代理、树形会话的 move/fork、
-自动触发的 compaction(当前需手动 `/compact`)。
+MCP、持久 Background/Task 系统、子代理、树形会话的 move/fork。
 
 ## 配置增量
 
@@ -239,6 +238,11 @@ MCP、持久 Background/Task 系统、子代理、树形会话的 move/fork、
 ```toml
 [agent]
 tool_timeout_secs = 300        # 可选:单工具执行超时,默认不限制
+
+[compaction]
+enabled = true                 # 可关闭自动触发；手动 /compact 始终可用
+reserve_tokens = 16384         # 在正常输入硬预算前触发
+keep_recent_tokens = 20000     # 压缩后原样保留的最近消息估算量
 
 [permissions]                  # allow | ask | deny
 workspace_read = "allow"

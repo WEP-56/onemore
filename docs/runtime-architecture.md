@@ -12,6 +12,8 @@ src/agent_loop.rs
 src/agent_loop/
   model_call.rs      Provider terminal、流事件转发与“未开播才重试”
   tests.rs           不构造 Agent/Config/SessionBackend 的 core 直接测试
+src/compaction.rs
+  自动压缩设置、阈值判断与不拆工具配对的确定性切分
 src/harness.rs
   ModelRegistry / SessionBackend / ModelPreferences 三个宿主接口
 src/harness/
@@ -23,10 +25,10 @@ src/runtime/
   agent_loop.rs       AgentLoopHost adapter：facts、预算、planning、队列、原子提交
   builder.rs          CLI 默认装配和宿主组件注入
   commands.rs         命令分发、模型切换、session 管理与通用事实提交
-  compaction.rs       纯文本压缩请求和 transcript 渲染
+  compaction.rs       手动/自动共用的纯文本摘要调用与原子 Compaction 提交
   tool_execution.rs   默认 ToolExecutor：schema、hooks、permissions、并发、取消与超时
   tests.rs            跨域测试夹具
-  tests/              按 builder / permissions / planning / history / queues / concurrency 分组
+  tests/              按 builder / compaction / permissions / planning / history / queues / concurrency 分组
 ```
 
 拆分按行为所有权进行，不按任意行数切片。核心生产文件保持在约 160 到 540 行；测试也按
@@ -54,6 +56,7 @@ transcript。工具 callback 必须闭合整批 ToolUse/ToolResult；默认 adap
 `AgentBuilder` 当前允许宿主替换或追加：
 
 - `ProviderFactory`：启动和后续 provider/model 切换共用同一个 factory。
+- `CompactionSettings`：配置或关闭请求前自动压缩，手动 `/compact` 不受开关影响。
 - `ModelRegistry`：CLI 配置、固定单模型或宿主动态模型目录使用同一解析接口。
 - `ToolRegistry`：可以使用空 registry 或完全由宿主提供工具。
 - `ContextProvider` 列表：可完整替换默认 instructions/project instructions/skills/workspace，
@@ -93,5 +96,7 @@ provider/model 切换、planning reminder、compaction command 和 session comma
 
 默认 adapter 从 facts 投影 model messages，在每次 callback commit 后重新投影并携带真实
 usage baseline；model change、compaction 和损坏历史修复的语义仍由 session/harness 层拥有。
+请求前达到阈值时，adapter 调用与手动 `/compact` 相同的摘要和提交函数；成功后以摘要、
+安全切分的 retained tail 和后续 facts 重新投影，失败或取消不会追加 Compaction 事实。
 `Agent::new(...)`、`Agent::builder_from_provider(...).in_memory()` 与 CLI 线程宿主最终都从
 `Agent::run_turn` 调用公开 `run_agent_loop`，不存在兼容用的第二套 loop。

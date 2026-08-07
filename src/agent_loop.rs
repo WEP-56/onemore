@@ -244,7 +244,8 @@ pub fn run_agent_loop(
             Ok(prompt) => prompt,
             Err(error) => {
                 (callbacks.emit)(AgentEvent::Error(format!("{error:#}")));
-                return finish(callbacks, messages, false);
+                let cancelled = callbacks.cancel.load(Ordering::Relaxed);
+                return finish(callbacks, messages, cancelled);
             }
         };
         let output = match call_model(

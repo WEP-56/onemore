@@ -7,7 +7,8 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use crate::agent_loop::{
     run_agent_loop, AgentLoopCallbacks, AgentLoopHost, ToolCall, ToolTurnResult,
 };
-use crate::context::budget::{apply_budget, BudgetDecision, ContextBudget};
+use crate::compaction::CompactionSettings;
+use crate::context::budget::{apply_budget, tool_spec_chars, BudgetDecision, ContextBudget};
 use crate::context::{ContextProvider, PromptContext};
 use crate::event::{AgentCommand, AgentEvent};
 use crate::harness::SessionBackend;
@@ -15,7 +16,7 @@ use crate::hooks::HookRegistry;
 use crate::message::{Block, ChatMessage, Role, StopReason, Usage};
 use crate::permission::{ApprovalResponse, PermissionManager};
 use crate::plan::{reduce_plan, return_in_progress_to_pending, PlanSnapshot};
-use crate::provider::TurnOutput;
+use crate::provider::{Provider, TurnOutput};
 use crate::session::{
     project_model_messages, ModelProjection, NoticeLevel, NoticeRecord, PlanReminderReason,
     PlanReminderRecord, SessionEntry, SessionEntryPayload,
@@ -25,7 +26,7 @@ use crate::util;
 use crate::workspace::Workspace;
 
 use super::tool_execution::{BatchItemState, DefaultToolExecutor};
-use super::Agent;
+use super::{Agent, CompactionRuntime, RetryPolicy};
 
 impl Agent {
     /// Start one stateful run, then delegate every model turn to the public core loop.
@@ -64,12 +65,16 @@ impl Agent {
         let projection = project_model_messages(&self.entries);
         let messages = projection.messages.clone();
         let approval_rx = self.approval_rx.as_ref();
+        let provider = self.provider.as_ref();
         let mut host = StatefulLoopHost {
+            provider,
             workspace: &self.workspace,
             tools: &self.tools,
             entries: &mut self.entries,
             extra_context: &self.extra_context,
             budget: self.budget,
+            compaction_settings: self.compaction_settings,
+            retry_policy: self.retry_policy,
             usage_total: &mut self.usage_total,
             sessions: self.sessions.as_mut(),
             permissions: &mut self.permissions,
@@ -77,6 +82,7 @@ impl Agent {
             approval_rx,
             deferred: &mut self.deferred,
             inbox,
+            cancel,
             projection,
             queues: RunQueues::default(),
             tool_timeout: self.tool_timeout,
@@ -86,7 +92,7 @@ impl Agent {
         let callbacks = AgentLoopCallbacks::new(&mut host, emit, cancel)
             .max_turns(self.max_turns)
             .retry_policy(self.retry_policy);
-        run_agent_loop(self.provider.as_ref(), messages, &specs, callbacks);
+        run_agent_loop(provider, messages, &specs, callbacks);
     }
 
     /// 供宿主循环在一次命令处理后取走延迟命令逐条执行。
@@ -96,11 +102,14 @@ impl Agent {
 }
 
 struct StatefulLoopHost<'a> {
+    provider: &'a dyn Provider,
     workspace: &'a Workspace,
     tools: &'a crate::tools::ToolRegistry,
     entries: &'a mut Vec<SessionEntry>,
     extra_context: &'a [Box<dyn ContextProvider>],
     budget: ContextBudget,
+    compaction_settings: CompactionSettings,
+    retry_policy: RetryPolicy,
     usage_total: &'a mut Usage,
     sessions: &'a mut dyn SessionBackend,
     permissions: &'a mut PermissionManager,
@@ -108,6 +117,7 @@ struct StatefulLoopHost<'a> {
     approval_rx: Option<&'a Receiver<ApprovalResponse>>,
     deferred: &'a mut VecDeque<AgentCommand>,
     inbox: Option<&'a Receiver<AgentCommand>>,
+    cancel: &'a AtomicBool,
     projection: ModelProjection,
     queues: RunQueues,
     tool_timeout: Option<std::time::Duration>,
@@ -166,11 +176,25 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
         }
         let mut projection = self.projection.clone();
         projection.messages = messages.to_vec();
+        let system_chars = prompt.system_text().chars().count() as u64;
+        let tools_chars = tool_spec_chars(tools);
+        if let Some(compacted) = CompactionRuntime::new(
+            self.provider,
+            self.budget,
+            self.compaction_settings,
+            self.retry_policy,
+            self.entries,
+            self.sessions,
+            self.usage_total,
+        )
+        .compact_if_needed(system_chars, tools_chars, emit, self.cancel)?
+        {
+            self.projection = compacted.clone();
+            projection = compacted;
+        }
         for diagnostic in &projection.diagnostics {
             emit(AgentEvent::Notice(format!("历史投影修复: {diagnostic}")));
         }
-        let system_chars = prompt.system_text().chars().count() as u64;
-        let tools_chars = tool_spec_chars(tools);
         match apply_budget(&self.budget, system_chars, tools_chars, projection) {
             BudgetDecision::Send {
                 messages, notices, ..
@@ -495,18 +519,6 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
 struct RunQueues {
     steering: VecDeque<String>,
     follow_up: VecDeque<String>,
-}
-
-fn tool_spec_chars(specs: &[ToolSpec]) -> u64 {
-    specs
-        .iter()
-        .map(|spec| {
-            (spec.name.chars().count()
-                + spec.description.chars().count()
-                + spec.schema.to_string().chars().count()
-                + 32) as u64
-        })
-        .sum()
 }
 
 pub(super) fn emit_plan_updated(snapshot: &PlanSnapshot, emit: &mut dyn FnMut(AgentEvent)) {

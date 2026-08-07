@@ -48,7 +48,7 @@ Several intentional operations create a cache boundary:
 
 - Switching provider or model.
 - Changing the system prompt or a tool schema.
-- Manual compaction, which replaces the model view with a new summary.
+- Manual or automatic compaction, which replaces older history with a summary and retained tail.
 - Context-budget shortening that changes an older tool result.
 
 Those operations must remain correct even when they cause a cache miss.

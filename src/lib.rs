@@ -12,6 +12,7 @@
 //! Runtime 模块边界见 `docs/runtime-architecture.md`，其余设计文档见 `docs/`。
 
 pub mod agent_loop;
+pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod event;

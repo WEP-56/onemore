@@ -33,6 +33,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::compaction::CompactionSettings;
 use crate::config::{ActiveModelSelection, ProviderCatalogEntry};
 use crate::context::budget::ContextBudget;
 use crate::context::ContextProvider;
@@ -54,6 +55,7 @@ mod tool_execution;
 
 pub use crate::agent_loop::RetryPolicy;
 pub use builder::{AgentBuilder, ProviderFactory};
+use compaction::CompactionRuntime;
 
 pub struct Agent {
     workspace: Workspace,
@@ -66,6 +68,7 @@ pub struct Agent {
     provider_factory: ProviderFactory,
     active_selection: ActiveModelSelection,
     budget: ContextBudget,
+    compaction_settings: CompactionSettings,
     retry_policy: RetryPolicy,
     models: Box<dyn ModelRegistry>,
     max_turns: u32,
