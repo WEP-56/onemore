@@ -1,12 +1,64 @@
-# 构建产物
+# ── 构建产物 ──
 /target
-/dist
+**/dist/
+**/dist-ssr/
 
-# 可能含 API key,不提交;示例见 config.example.toml
-/config.toml
+# ── 依赖 ──
+node_modules/
 
-# 杂项，不提交防止污染仓库
+# ── Rust / Tauri ──
+**/target/
+**/src-tauri/target/
+**/src-tauri/gen/schemas/
+
+# ── 测试输出 ──
+test-results/
+
+# ── 可能含 API key，不提交 ──
+config.toml
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── 日志 ──
+*.log
+*.local
+
+# ── 环境变量 ──
+.env
+.env.*
+
+# ── 杂项 ──
 /.claude
 /example/
-
 长任务测试观察.md
+
+# ── 参考项目，不提交 ──
+Gui-rpc-example/desktop-cc-gui/
+
+# ── cc-gui 本地工作区状态 ──
+**/.codex-worktrees/
+**/.ace-tool/
+**/.artifacts/
+**/release-local
+**/.ccgui/
+**/.omx/
+**/.specstory/
+**/.superpowers/
+**/.playwright-mcp/
+**/.mossx
+
+# ── 本地生成脚本与图标源 ──
+**/gen-icon.ps1
+**/app-icon.png

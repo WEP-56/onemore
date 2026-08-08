@@ -1,0 +1,24 @@
+[package]
+name = "onemore-gui"
+version = "0.1.0"
+description = "Onemore coding agent GUI"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+git2 = "0.20"
+ignore = "0.4"
+dunce = "1"
+
+[profile.release]
+strip = true

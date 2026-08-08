@@ -1,0 +1,315 @@
+// Zustand 全局 store：RPC 连接、事件投影、workspace 管理、session 列表、config、git。
+
+import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  rpcDiagnosticsTail,
+  rpcRequest,
+  rpcSnapshot,
+  rpcStart,
+  rpcStop,
+  subscribeBackend,
+  toErrorMessage,
+} from "../rpc/client";
+import {
+  applyEvent,
+  applyHello,
+  applyProcessExit,
+  applyRequestError,
+  applySnapshot,
+  applyStderr,
+  applyTransportError,
+  freshViewState,
+} from "../rpc/reducer";
+import type { ApprovalDecision } from "../rpc/protocol";
+import type {
+  GitStatus,
+  SessionEntry,
+  SessionViewState,
+  WorkspaceEntry,
+  WorkspaceList,
+} from "./types";
+
+interface AppStore extends SessionViewState {
+  // workspace 管理
+  workspaces: WorkspaceEntry[];
+  activeWorkspace: string | null;
+  // session 列表（跨 workspace 扫描）
+  sessions: SessionEntry[];
+  // config
+  configText: string;
+  configDirty: boolean;
+  // git
+  gitStatus: GitStatus | null;
+  // UI
+  initialized: boolean;
+  settingsOpen: boolean;
+  draft: string;
+  searchQuery: string;
+  busy: boolean;
+
+  init(): Promise<void>;
+  setDraft(v: string): void;
+  setSearchQuery(v: string): void;
+  setSettingsOpen(open: boolean): void;
+
+  // workspace
+  loadWorkspaces(): Promise<void>;
+  addWorkspace(path: string): Promise<void>;
+  removeWorkspace(path: string): Promise<void>;
+  selectWorkspace(path: string): Promise<void>;
+
+  // session
+  loadSessions(): Promise<void>;
+  loadSession(id: string): Promise<void>;
+  clearConversation(): Promise<void>;
+
+  // config
+  loadConfig(): Promise<void>;
+  saveConfig(text: string): Promise<void>;
+
+  // git
+  loadGitStatus(workspace: string): Promise<void>;
+
+  // RPC
+  connect(workspace: string): Promise<void>;
+  disconnect(): Promise<void>;
+  sendPrompt(text: string): Promise<void>;
+  sendSteer(text: string): Promise<void>;
+  sendAbort(): Promise<void>;
+  setModel(provider: string, model: string, effort: string): Promise<void>;
+  respondApproval(decision: ApprovalDecision): Promise<void>;
+  snapshotNow(): Promise<void>;
+  refreshDiagnostics(): Promise<void>;
+}
+
+export const useStore = create<AppStore>((set, get) => {
+  async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
+    set({ busy: true });
+    try {
+      return await fn();
+    } finally {
+      set({ busy: false });
+    }
+  }
+
+  async function sendCommand(
+    command: string,
+    params: Record<string, unknown> | null,
+  ): Promise<void> {
+    try {
+      const res = await withBusy(() =>
+        rpcRequest<{ command?: string; command_id?: string }>(command, params ?? undefined),
+      );
+      const metrics = {
+        ...get().metrics,
+        acceptedCommands: get().metrics.acceptedCommands + 1,
+      };
+      set({ metrics, lastError: null });
+      if (res?.command_id) {
+        set({ run: { commandId: res.command_id, startedAt: Date.now() } });
+      }
+    } catch (e) {
+      const err = toErrorMessage(e);
+      set(applyRequestError(get(), err.code, err.message));
+    }
+  }
+
+  return {
+    ...freshViewState(),
+    workspaces: [],
+    activeWorkspace: null,
+    sessions: [],
+    configText: "",
+    configDirty: false,
+    gitStatus: null,
+    initialized: false,
+    settingsOpen: false,
+    draft: "",
+    searchQuery: "",
+    busy: false,
+
+    init: async () => {
+      if (get().initialized) return;
+      set({ initialized: true });
+      await subscribeBackend((ev) => {
+        const s = get();
+        switch (ev.kind) {
+          case "hello":
+            set(applyHello(s, ev.server, ev.snapshot));
+            void get().loadSessions();
+            void get().loadGitStatus(ev.snapshot.workspace);
+            break;
+          case "event":
+            set(applyEvent(s, ev.event));
+            if (ev.event.type === "settled") {
+              void rpcRequest("get_snapshot").catch(() => {});
+            }
+            break;
+          case "stderr":
+            set(applyStderr(s, ev.line));
+            break;
+          case "transport_error":
+            set(applyTransportError(s, ev.code, ev.message));
+            break;
+          case "process_exit":
+            set(applyProcessExit(s, ev.code));
+            break;
+        }
+      });
+      try {
+        const snap = await rpcSnapshot();
+        if (snap) set(applySnapshot(get(), snap));
+      } catch {
+        // 未连接时忽略
+      }
+      await get().loadWorkspaces();
+      await get().loadSessions();
+    },
+
+    setDraft: (draft) => set({ draft }),
+    setSearchQuery: (searchQuery) => set({ searchQuery }),
+    setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+
+    loadWorkspaces: async () => {
+      try {
+        const list = await invoke<WorkspaceList>("list_workspaces");
+        set({ workspaces: list.workspaces });
+      } catch {
+        // ignore
+      }
+    },
+
+    addWorkspace: async (path) => {
+      try {
+        const list = await invoke<WorkspaceList>("add_workspace", { path });
+        set({ workspaces: list.workspaces });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    removeWorkspace: async (path) => {
+      try {
+        const list = await invoke<WorkspaceList>("remove_workspace", { path });
+        set({ workspaces: list.workspaces });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    selectWorkspace: async (path) => {
+      set({ activeWorkspace: path });
+      await get().loadGitStatus(path);
+    },
+
+    loadSessions: async () => {
+      try {
+        const sessions = await invoke<SessionEntry[]>("list_all_sessions");
+        set({ sessions });
+      } catch {
+        // ignore
+      }
+    },
+
+    loadSession: async (id) => {
+      const active = get().activeWorkspace;
+      if (!active) return;
+      // 确保已连接到对应 workspace
+      if (get().conn !== "connected") {
+        await get().connect(active);
+      }
+      await sendCommand("load_session", { session_id: id });
+    },
+
+    clearConversation: () => sendCommand("clear_conversation", null),
+
+    loadConfig: async () => {
+      try {
+        const text = await invoke<string>("read_config");
+        set({ configText: text, configDirty: false });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    saveConfig: async (text) => {
+      try {
+        await invoke("write_config", { content: text });
+        set({ configText: text, configDirty: false });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    loadGitStatus: async (workspace) => {
+      try {
+        const status = await invoke<GitStatus>("get_git_status", { workspace });
+        set({ gitStatus: status });
+      } catch {
+        // ignore
+      }
+    },
+
+    connect: async (workspace) => {
+      const normalized = workspace.replace(/^\\\\\?\\/, "");
+      set({ activeWorkspace: workspace, ...freshViewState(), conn: "spawning" });
+      try {
+        await rpcStart({
+          executable: "onemore",
+          config: null,
+          workspace: normalized,
+        });
+        set({ conn: "handshaking" });
+      } catch (e) {
+        const err = toErrorMessage(e);
+        set({
+          conn: "disconnected",
+          lastError: err,
+          transportIssues: [{ code: err.code, message: err.message, at: Date.now() }],
+        });
+      }
+    },
+
+    disconnect: async () => {
+      set({ conn: "shutting_down" });
+      try {
+        await rpcStop();
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    sendPrompt: (text) => sendCommand("prompt", { text }),
+    sendSteer: (text) => sendCommand("steer", { text }),
+    sendAbort: () => sendCommand("abort", null),
+    setModel: (provider, model, effort) =>
+      sendCommand("set_model", { provider, model, effort }),
+
+    respondApproval: async (decision) => {
+      const req = get().liveApproval ?? get().snapshot?.pending_approval ?? null;
+      if (!req) return;
+      set({ liveApproval: null });
+      await sendCommand("approval_response", { request_id: req.request_id, decision });
+    },
+
+    snapshotNow: async () => {
+      try {
+        await withBusy(() => rpcRequest("get_snapshot"));
+      } catch (e) {
+        const err = toErrorMessage(e);
+        set(applyRequestError(get(), err.code, err.message));
+      }
+    },
+
+    refreshDiagnostics: async () => {
+      try {
+        const lines = await rpcDiagnosticsTail(400);
+        set({ stderrLines: lines });
+      } catch (e) {
+        const err = toErrorMessage(e);
+        set(applyRequestError(get(), err.code, err.message));
+      }
+    },
+  };
+});

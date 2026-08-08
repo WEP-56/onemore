@@ -146,7 +146,7 @@ stdout 读取：只以 0x0A 分帧，U+2028/U+2029 不是分隔符
 ### 4.3 增量 reader 与严格 DTO
 
 - stdout 用**增量** JSONL reader：半帧 EOF、超长帧、无效 UTF-8 都要是明确错误，
-  不能静默跳过（`Gui-rpc-example/src-tauri/src/rpc/reader.rs`）；
+  不能静默跳过（`onemoreGui/src-tauri/src/rpc/reader.rs`）；
 - 服务端对所有 object 用 `deny_unknown_fields`，你收到的帧如果解析失败，
   按 transport error 处理并终止连接——**不要宽容**；
 - 未知 tag / 重复 request ID / malformed JSON 都是协议错误，不是可恢复噪音。
@@ -244,20 +244,20 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 
 ---
 
-## 9. 参考代码索引（Gui-rpc-example）
+## 9. 参考代码索引（onemoreGui）
 
 | 职责 | 文件 |
 |---|---|
-| 协议 view types（TS discriminated unions） | `src/rpc/protocol.ts` |
-| Tauri invoke / 事件订阅（唯一 transport 入口） | `src/rpc/client.ts` |
-| snapshot 权威 + progress 增量 reducer | `src/rpc/reducer.ts`（含 Vitest fixtures） |
-| 状态 store（连接/phase/queue/approval/指标） | `src/app/store.ts` |
-| 子进程生命周期 + pending map + 安全 shutdown | `src-tauri/src/rpc/process.rs` |
-| LF 单 writer | `src-tauri/src/rpc/writer.rs` |
-| 增量 JSONL reader（半帧/超长/UTF-8） | `src-tauri/src/rpc/reader.rs` |
-| 严格入站 DTO | `src-tauri/src/rpc/types.rs` |
-| GUI 事件 DTO（封闭，不伪装协议事件） | `src-tauri/src/rpc/events.rs` |
-| 审批 modal / transcript / 诊断面板 | `src/components/*` |
+| 协议 view types（TS discriminated unions） | `onemoreGui/src/rpc/protocol.ts` |
+| Tauri invoke / 事件订阅（唯一 transport 入口） | `onemoreGui/src/rpc/client.ts` |
+| snapshot 权威 + progress 增量 reducer | `onemoreGui/src/rpc/reducer.ts` |
+| 状态 store（连接/phase/queue/approval/指标） | `onemoreGui/src/app/store.ts` |
+| 子进程生命周期 + pending map + 安全 shutdown | `onemoreGui/src-tauri/src/rpc/process.rs` |
+| LF 单 writer | `onemoreGui/src-tauri/src/rpc/writer.rs` |
+| 增量 JSONL reader（半帧/超长/UTF-8） | `onemoreGui/src-tauri/src/rpc/reader.rs` |
+| 严格入站 DTO | `onemoreGui/src-tauri/src/rpc/types.rs` |
+| GUI 事件 DTO（封闭，不伪装协议事件） | `onemoreGui/src-tauri/src/rpc/events.rs` |
+| 审批 modal / transcript / composer | `onemoreGui/src/components/*` |
 
 ---
 
