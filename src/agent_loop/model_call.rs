@@ -20,9 +20,9 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         RetryPolicy {
-            max_attempts: 3,
-            base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(30),
+            max_attempts: 8,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(10),
             max_retry_after: Duration::from_secs(60),
             jitter_seed: 0x9E37_79B9_7F4A_7C15,
         }
@@ -96,13 +96,12 @@ pub(crate) fn call_model(
                 let Some(wait) = delay else {
                     return ModelCallResult::Failed(failed);
                 };
-                emit(AgentEvent::Notice(format!(
-                    "{},{:.1}s 后重试({}/{})",
-                    failed.error,
-                    wait.as_secs_f64(),
+                emit(AgentEvent::RetryScheduled {
                     attempt,
-                    retry_policy.max_attempts - 1
-                )));
+                    max_retries: retry_policy.max_attempts.saturating_sub(1),
+                    delay_ms: wait.as_millis().min(u128::from(u64::MAX)) as u64,
+                    error: failed.error.to_string(),
+                });
                 let mut slept = Duration::ZERO;
                 while slept < wait {
                     if cancel.load(Ordering::Relaxed) {
@@ -112,6 +111,10 @@ pub(crate) fn call_model(
                     slept += Duration::from_millis(100);
                 }
                 attempt += 1;
+                emit(AgentEvent::RetryStarted {
+                    attempt: attempt - 1,
+                    max_retries: retry_policy.max_attempts.saturating_sub(1),
+                });
             }
         }
     }

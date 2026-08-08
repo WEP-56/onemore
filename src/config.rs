@@ -150,11 +150,26 @@ pub struct ProviderSettings {
 struct FileConfig {
     agent: AgentSection,
     #[serde(default)]
+    retry: RetrySection,
+    #[serde(default)]
     compaction: CompactionSection,
     #[serde(default)]
     permissions: PermissionsSection,
     #[serde(default)]
     providers: BTreeMap<String, RawProviderSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RetrySection {
+    #[serde(default)]
+    max_attempts: Option<u32>,
+    #[serde(default)]
+    base_delay_ms: Option<u64>,
+    #[serde(default)]
+    max_delay_ms: Option<u64>,
+    #[serde(default)]
+    max_retry_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -301,6 +316,7 @@ pub struct Config {
     pub system_prompt: Option<String>,
     /// 一轮对话里最多连续调用模型的次数(失控保护)。
     pub max_turns: u32,
+    pub retry_policy: crate::agent_loop::RetryPolicy,
     /// 单个工具调用的执行超时(None = 不限制;run_command 另有自己的超时)。
     pub tool_timeout: Option<std::time::Duration>,
     pub compaction: CompactionSettings,
@@ -373,15 +389,40 @@ impl Config {
                 shell
             );
         }
-        let max_turns = raw.agent.max_turns.unwrap_or(50);
+        let max_turns = raw.agent.max_turns.unwrap_or(200);
         if max_turns == 0 {
             bail!("[agent].max_turns 必须大于 0");
         }
+        let retry_defaults = crate::agent_loop::RetryPolicy::default();
+        let retry_policy = crate::agent_loop::RetryPolicy {
+            max_attempts: raw
+                .retry
+                .max_attempts
+                .unwrap_or(retry_defaults.max_attempts),
+            base_delay: std::time::Duration::from_millis(
+                raw.retry
+                    .base_delay_ms
+                    .unwrap_or(retry_defaults.base_delay.as_millis() as u64),
+            ),
+            max_delay: std::time::Duration::from_millis(
+                raw.retry
+                    .max_delay_ms
+                    .unwrap_or(retry_defaults.max_delay.as_millis() as u64),
+            ),
+            max_retry_after: std::time::Duration::from_millis(
+                raw.retry
+                    .max_retry_after_ms
+                    .unwrap_or(retry_defaults.max_retry_after.as_millis() as u64),
+            ),
+            jitter_seed: retry_defaults.jitter_seed,
+        };
+        validate_retry_policy(retry_policy)?;
         Ok(Config {
             active_provider: raw.agent.provider,
             shell,
             system_prompt: raw.agent.system_prompt,
             max_turns,
+            retry_policy,
             tool_timeout: raw
                 .agent
                 .tool_timeout_secs
@@ -785,6 +826,22 @@ fn parse_permission_rule(
         .map(|rule| rule.unwrap_or(default))
 }
 
+fn validate_retry_policy(policy: crate::agent_loop::RetryPolicy) -> Result<()> {
+    if policy.max_attempts == 0 {
+        bail!("[retry].max_attempts 必须大于 0");
+    }
+    if policy.base_delay.is_zero() {
+        bail!("[retry].base_delay_ms 必须大于 0");
+    }
+    if policy.max_delay < policy.base_delay {
+        bail!("[retry].max_delay_ms 不能小于 base_delay_ms");
+    }
+    if policy.max_retry_after.is_zero() {
+        bail!("[retry].max_retry_after_ms 必须大于 0");
+    }
+    Ok(())
+}
+
 /// 首次运行时写出的模板(同时也是 config.example.toml 的内容)。
 pub const EXAMPLE_CONFIG: &str = r#"# Onemore 全局配置文件(Windows 默认 %APPDATA%/onemore/config.toml)
 # [agent].provider 决定当前用哪个 [providers.*];TUI 里可用 /provider 名字 热切换。
@@ -795,11 +852,18 @@ provider = "anthropic"
 # auto = 找到 Git Bash 就用它(模型对 bash 语法最熟),否则退回 PowerShell
 shell = "auto"
 # 一轮对话里最多连续调用模型的次数(防止失控空转)
-max_turns = 50
+max_turns = 200
 # 可选：单个工具调用超时秒数；省略或 0 表示不限制。
 # tool_timeout_secs = 300
 # 想完全接管系统提示就取消下面的注释:
 # system_prompt = "You are ..."
+
+# 模型请求级重试。max_attempts 包含首次请求；只有尚未产生流事件时才会自动重放。
+[retry]
+max_attempts = 8
+base_delay_ms = 1000
+max_delay_ms = 10000
+max_retry_after_ms = 60000
 
 # 自动压缩在正常输入预算前预留一段余量，并原样保留最近消息。
 [compaction]

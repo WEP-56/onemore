@@ -76,7 +76,7 @@ const HELP_TEXT: &str = "斜杠命令\n\
   /model             选择当前 provider 的模型与思考程度\n\
   /reasoning         调整当前模型的思考程度\n\
   /provider          选择 provider(对话历史保留)\n\
-  /session [ID]      列出或恢复历史会话\n\
+  /session [ID|all]  列出或恢复历史会话；all 显示其他 workspace\n\
   /skill [名称]       选择并加载一个本地技能\n\
   /compact           压缩历史(摘要替代模型视图,事实保留)\n\
   /queue <内容>      排队后续任务(当前任务结束后执行)\n\
@@ -460,6 +460,27 @@ impl App {
                 self.busy = true;
                 self.status_note = "思考中".into();
             }
+            ProgressEvent::RetryScheduled {
+                attempt,
+                max_retries,
+                delay_ms,
+                error,
+            } => {
+                self.status_note = format!(
+                    "重试 {}/{}，等待 {:.1}s",
+                    attempt,
+                    max_retries,
+                    delay_ms as f64 / 1000.0
+                );
+                self.transcript.push_notice(format!(
+                    "{}，{:.1}s 后重试({}/{})",
+                    error,
+                    delay_ms as f64 / 1000.0,
+                    attempt,
+                    max_retries
+                ));
+            }
+            ProgressEvent::RetryStarted { .. } => self.status_note = "正在重新连接模型".into(),
             ProgressEvent::AssistantDelta { kind, delta, .. } if kind == "thinking" => {
                 self.transcript.append_thinking(&delta)
             }
@@ -646,9 +667,10 @@ impl App {
                 PickerItem {
                     label,
                     description: format!(
-                        "{} 条消息 · {}{}",
+                        "{} 条消息 · {} · {}{}",
                         session.message_count,
                         short_id(&session.id),
+                        session.workspace,
                         if is_current { " · 当前" } else { "" }
                     ),
                     value: Some(session.id),
@@ -718,6 +740,27 @@ impl App {
                 self.busy = true;
                 self.status_note = "思考中".into();
             }
+            AgentEvent::RetryScheduled {
+                attempt,
+                max_retries,
+                delay_ms,
+                error,
+            } => {
+                self.status_note = format!(
+                    "重试 {}/{}，等待 {:.1}s",
+                    attempt,
+                    max_retries,
+                    delay_ms as f64 / 1000.0
+                );
+                self.transcript.push_notice(format!(
+                    "{}，{:.1}s 后重试({}/{})",
+                    error,
+                    delay_ms as f64 / 1000.0,
+                    attempt,
+                    max_retries
+                ));
+            }
+            AgentEvent::RetryStarted { .. } => self.status_note = "正在重新连接模型".into(),
             AgentEvent::AssistantDelta(t) => self.transcript.append_assistant(&t),
             AgentEvent::ThinkingDelta(t) => self.transcript.append_thinking(&t),
             AgentEvent::AssistantMessage(full) => self.transcript.finalize_assistant(full),
@@ -1453,12 +1496,14 @@ impl App {
                 }
             }
             command::SlashCommand::Session => {
-                if rest.is_empty() {
+                if rest.is_empty() || rest.eq_ignore_ascii_case("all") {
                     self.overlay = Some(Overlay::Loading {
                         kind: PickerKind::Session,
                         title: "正在读取会话…".into(),
                     });
-                    self.runtime.submit(AgentCommand::ListSessions);
+                    self.runtime.submit(AgentCommand::ListSessions {
+                        all: rest.eq_ignore_ascii_case("all"),
+                    });
                 } else {
                     self.runtime
                         .submit(AgentCommand::LoadSession(rest.to_string()));
@@ -2263,7 +2308,10 @@ mod tests {
     fn session_slash_commands_are_forwarded() {
         let (mut app, _evt, cmd, _approvals) = dummy_app();
         app.handle_slash("session");
-        assert!(matches!(cmd.recv().unwrap(), AgentCommand::ListSessions));
+        assert!(matches!(
+            cmd.recv().unwrap(),
+            AgentCommand::ListSessions { all: false }
+        ));
 
         app.handle_slash("session abc12345");
         match cmd.recv().unwrap() {
@@ -2278,7 +2326,10 @@ mod tests {
 
         let (mut app, _evt, cmd, _approvals) = dummy_app();
         app.handle_slash("session");
-        assert!(matches!(cmd.recv().unwrap(), AgentCommand::ListSessions));
+        assert!(matches!(
+            cmd.recv().unwrap(),
+            AgentCommand::ListSessions { all: false }
+        ));
         assert!(matches!(
             app.overlay,
             Some(Overlay::Loading {
@@ -2293,12 +2344,14 @@ mod tests {
                 SessionSummary {
                     id: "current-session".into(),
                     title: "当前工作".into(),
+                    workspace: "E:\\work".into(),
                     message_count: 8,
                     updated_at: 2,
                 },
                 SessionSummary {
                     id: "older-session".into(),
                     title: "旧会话".into(),
+                    workspace: "E:\\work".into(),
                     message_count: 3,
                     updated_at: 1,
                 },

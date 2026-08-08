@@ -7,11 +7,18 @@ provider = "anthropic"
 # auto = 找到 Git Bash 就用它(模型对 bash 语法最熟),否则退回 PowerShell
 shell = "auto"
 # 一轮对话里最多连续调用模型的次数(防止失控空转)
-max_turns = 50
+max_turns = 200
 # 可选：单个工具调用超时秒数；省略或 0 表示不限制。
 # tool_timeout_secs = 300
 # 想完全接管系统提示就取消下面的注释:
 # system_prompt = "You are ..."
+
+# 模型请求级重试。max_attempts 包含首次请求；只有尚未产生流事件时才会自动重放。
+[retry]
+max_attempts = 8
+base_delay_ms = 1000
+max_delay_ms = 10000
+max_retry_after_ms = 60000
 
 # 自动压缩在正常输入预算前预留一段余量，并原样保留最近消息。
 [compaction]

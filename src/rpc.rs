@@ -310,8 +310,12 @@ fn handle_request(
         RequestCommand::ClearConversation => ResponseResult::ClearConversation {
             command_id: controller.clear_conversation()?.command_id,
         },
-        RequestCommand::ListSessions => ResponseResult::ListSessions {
-            sessions: controller.list_sessions()?,
+        RequestCommand::ListSessions { all } => ResponseResult::ListSessions {
+            sessions: if all {
+                controller.list_all_sessions()?
+            } else {
+                controller.list_sessions()?
+            },
         },
         RequestCommand::LoadSession { session_id } => ResponseResult::LoadSession {
             command_id: controller.load_session(session_id)?.command_id,

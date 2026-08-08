@@ -120,6 +120,14 @@ impl ProviderError {
             retry_after: None,
         }
     }
+
+    pub fn retryable(message: impl Into<String>) -> Self {
+        ProviderError {
+            message: message.into(),
+            retryable: true,
+            retry_after: None,
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderError {

@@ -135,6 +135,7 @@ export interface SessionSnapshot {
 export interface SessionSummaryView {
   id: string;
   title: string;
+  workspace: string;
   message_count: number;
   updated_at: number;
 }
@@ -156,6 +157,8 @@ export type SessionEvent =
 export type ProgressEvent =
   | { type: "user_message"; text: string }
   | { type: "run_started"; command_id: string }
+  | { type: "retry_scheduled"; attempt: number; max_retries: number; delay_ms: number; error: string }
+  | { type: "retry_started"; attempt: number; max_retries: number }
   | { type: "assistant_delta"; message_id: string; content_index: number; kind: string; delta: string }
   | { type: "assistant_finished"; message_id: string; text: string }
   | { type: "tool_call_pending"; name: string }

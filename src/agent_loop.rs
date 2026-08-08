@@ -205,7 +205,7 @@ impl<'a> AgentLoopCallbacks<'a> {
             host,
             emit,
             cancel,
-            max_turns: 50,
+            max_turns: 200,
             retry_policy: RetryPolicy::default(),
         }
     }

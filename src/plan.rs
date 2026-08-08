@@ -35,6 +35,14 @@ pub struct PlanItem {
     pub status: PlanStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanItemPatch {
+    pub id: String,
+    pub text: Option<String>,
+    pub status: Option<PlanStatus>,
+    pub remove: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSnapshot {
     pub revision: u64,
@@ -132,6 +140,96 @@ pub fn update_plan(
     })?;
     validate_transition(current, &snapshot)?;
     Ok(snapshot)
+}
+
+pub fn patch_plan(
+    current: &PlanSnapshot,
+    patches: Vec<PlanItemPatch>,
+    explanation: Option<String>,
+    clear: bool,
+) -> Result<PlanSnapshot, PlanError> {
+    if clear {
+        if !patches.is_empty() || explanation.is_some() {
+            return Err(PlanError::invalid(
+                "clear cannot be combined with items or explanation",
+            ));
+        }
+        return update_plan(current, current.revision, Vec::new(), None);
+    }
+    if patches.is_empty() && explanation.is_none() {
+        return Err(PlanError::invalid(
+            "update_plan requires at least one item patch, explanation, or clear=true",
+        ));
+    }
+
+    let mut items = current.items.clone();
+    let mut seen = std::collections::HashSet::new();
+    for mut patch in patches {
+        patch.id = patch.id.trim().to_string();
+        if patch.id.is_empty() {
+            return Err(PlanError::invalid("plan item patch has an empty id"));
+        }
+        if !seen.insert(patch.id.clone()) {
+            return Err(PlanError::invalid(format!(
+                "duplicate plan item patch id {:?}",
+                patch.id
+            )));
+        }
+        let position = items.iter().position(|item| item.id == patch.id);
+        if patch.remove {
+            if patch.text.is_some() || patch.status.is_some() {
+                return Err(PlanError::invalid(format!(
+                    "removed plan item {:?} cannot also set text or status",
+                    patch.id
+                )));
+            }
+            let Some(position) = position else {
+                return Err(PlanError::invalid(format!(
+                    "cannot remove unknown plan item {:?}",
+                    patch.id
+                )));
+            };
+            items.remove(position);
+            continue;
+        }
+
+        match position {
+            Some(position) => {
+                if patch.text.is_none() && patch.status.is_none() {
+                    return Err(PlanError::invalid(format!(
+                        "plan item patch {:?} changes no fields",
+                        patch.id
+                    )));
+                }
+                if let Some(text) = patch.text {
+                    items[position].text = text;
+                }
+                if let Some(status) = patch.status {
+                    items[position].status = status;
+                }
+            }
+            None => {
+                let Some(text) = patch.text else {
+                    return Err(PlanError::invalid(format!(
+                        "new plan item {:?} requires text",
+                        patch.id
+                    )));
+                };
+                items.push(PlanItem {
+                    id: patch.id,
+                    text,
+                    status: patch.status.unwrap_or(PlanStatus::Pending),
+                });
+            }
+        }
+    }
+
+    update_plan(
+        current,
+        current.revision,
+        items,
+        explanation.or_else(|| current.explanation.clone()),
+    )
 }
 
 pub fn validate_transition(current: &PlanSnapshot, next: &PlanSnapshot) -> Result<(), PlanError> {
@@ -447,6 +545,85 @@ mod tests {
         let error = update_plan(&current, 3, Vec::new(), None).unwrap_err();
         assert_eq!(error.kind, PlanErrorKind::Conflict);
         assert!(error.message.contains("current 4"));
+    }
+
+    #[test]
+    fn patches_update_add_remove_and_preserve_server_revision() {
+        let current = PlanSnapshot {
+            revision: 4,
+            items: vec![
+                item("done", PlanStatus::Completed),
+                item("active", PlanStatus::InProgress),
+            ],
+            explanation: Some("old".into()),
+        };
+        let next = patch_plan(
+            &current,
+            vec![
+                PlanItemPatch {
+                    id: "active".into(),
+                    text: None,
+                    status: Some(PlanStatus::Completed),
+                    remove: false,
+                },
+                PlanItemPatch {
+                    id: "next".into(),
+                    text: Some("new work".into()),
+                    status: Some(PlanStatus::InProgress),
+                    remove: false,
+                },
+                PlanItemPatch {
+                    id: "done".into(),
+                    text: None,
+                    status: None,
+                    remove: true,
+                },
+            ],
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(next.revision, 5);
+        assert_eq!(next.items.len(), 2);
+        assert_eq!(next.items[0].id, "active");
+        assert_eq!(next.items[0].status, PlanStatus::Completed);
+        assert_eq!(next.items[1].status, PlanStatus::InProgress);
+        assert_eq!(next.explanation.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn patch_rejects_ambiguous_or_unknown_operations() {
+        let current = PlanSnapshot {
+            revision: 1,
+            items: vec![item("known", PlanStatus::Pending)],
+            explanation: None,
+        };
+        assert!(patch_plan(&current, Vec::new(), None, false).is_err());
+        assert!(patch_plan(
+            &current,
+            vec![PlanItemPatch {
+                id: "missing".into(),
+                text: None,
+                status: Some(PlanStatus::Completed),
+                remove: false,
+            }],
+            None,
+            false,
+        )
+        .is_err());
+        assert!(patch_plan(
+            &current,
+            vec![PlanItemPatch {
+                id: "missing".into(),
+                text: None,
+                status: None,
+                remove: true,
+            }],
+            None,
+            false,
+        )
+        .is_err());
+        assert!(patch_plan(&current, Vec::new(), Some("cannot combine".into()), true,).is_err());
     }
 
     #[test]

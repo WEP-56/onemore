@@ -282,6 +282,9 @@ pub struct UpdatePlanArgs {
 }
 ```
 
+> 历史方案说明：本节记录的是调研阶段的完整快照 + `expected_revision` 设计。当前生产接口已
+> 收敛为按稳定 ID 的增量 `items` patch，revision 由服务端递增；清空使用 `clear: true`。
+
 建议硬上限：最多 32 项；ID 最多 64 字符；每项正文最多 512 字符；explanation 最多 2,000 字符。所有文本 trim 后校验，序列化顺序保持输入顺序。
 
 #### Session Facts 与 reducer

@@ -107,7 +107,10 @@ impl crate::harness::SessionBackend for ListFailBackend {
         self.inner.append_payloads(payloads, usage)
     }
 
-    fn list(&self) -> anyhow::Result<Vec<crate::session::SessionSummary>> {
+    fn list(
+        &self,
+        _scope: crate::session::SessionListScope,
+    ) -> anyhow::Result<crate::session::SessionList> {
         anyhow::bail!("list unavailable")
     }
 }

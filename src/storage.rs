@@ -31,7 +31,8 @@ use crate::harness::{ModelPreferences, SessionBackend};
 use crate::message::{Block, CacheUsage, ChatMessage, Role, Usage};
 use crate::plan::validate_plan_append;
 use crate::session::{
-    validate_new_message_batch, MessageRecord, SessionEntry, SessionEntryPayload,
+    validate_new_message_batch, MessageRecord, SessionEntry, SessionEntryPayload, SessionList,
+    SessionListScope,
 };
 
 pub use crate::session::SessionSummary;
@@ -259,7 +260,21 @@ fn platform_app_root() -> Result<PathBuf> {
 pub struct SessionManager {
     sessions_dir: PathBuf,
     workspace: String,
-    current: SessionStore,
+    current: CurrentSession,
+}
+
+enum CurrentSession {
+    Pending { id: String },
+    Open(SessionStore),
+}
+
+impl CurrentSession {
+    fn id(&self) -> &str {
+        match self {
+            CurrentSession::Pending { id } => id,
+            CurrentSession::Open(store) => &store.id,
+        }
+    }
 }
 
 impl SessionManager {
@@ -267,7 +282,9 @@ impl SessionManager {
         std::fs::create_dir_all(&sessions_dir)
             .with_context(|| format!("创建会话目录 {} 失败", sessions_dir.display()))?;
         let workspace = workspace_key(workspace);
-        let current = SessionStore::create(&sessions_dir, &workspace)?;
+        let current = CurrentSession::Pending {
+            id: uuid::Uuid::new_v4().to_string(),
+        };
         Ok(SessionManager {
             sessions_dir,
             workspace,
@@ -276,7 +293,7 @@ impl SessionManager {
     }
 
     pub fn current_id(&self) -> &str {
-        &self.current.id
+        self.current.id()
     }
 
     /// 把一批 payload 变成因果相连的 entry 并原子提交。
@@ -287,15 +304,39 @@ impl SessionManager {
         payloads: Vec<SessionEntryPayload>,
         usage: Usage,
     ) -> Result<Vec<SessionEntry>> {
-        self.current.append_payloads(payloads, usage)
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        match &mut self.current {
+            CurrentSession::Open(store) => store.append_payloads(payloads, usage),
+            CurrentSession::Pending { id } => {
+                validate_new_message_batch(&payloads).map_err(anyhow::Error::msg)?;
+                validate_plan_append(&[], &payloads)
+                    .map_err(|error| anyhow::Error::msg(error.message))?;
+                let mut store = SessionStore::create(&self.sessions_dir, &self.workspace, id)?;
+                let appended = store.append_payloads(payloads, usage)?;
+                self.current = CurrentSession::Open(store);
+                Ok(appended)
+            }
+        }
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        self.current.clear()
+        match &mut self.current {
+            CurrentSession::Pending { .. } => Ok(()),
+            CurrentSession::Open(store) => store.clear(),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<SessionSummary>> {
+        Ok(self
+            .list_scope(SessionListScope::CurrentWorkspace)?
+            .sessions)
+    }
+
+    pub fn list_scope(&self, scope: SessionListScope) -> Result<SessionList> {
         let mut sessions = Vec::new();
+        let mut warnings = Vec::new();
         for entry in std::fs::read_dir(&self.sessions_dir)
             .with_context(|| format!("读取会话目录 {} 失败", self.sessions_dir.display()))?
         {
@@ -304,10 +345,22 @@ impl SessionManager {
             if path.extension().and_then(|s| s.to_str()) != Some("db") {
                 continue;
             }
-            match SessionStore::read_summary(&path, &self.workspace) {
-                Ok(Some(summary)) => sessions.push(summary),
+            match SessionStore::read_summary(&path) {
+                Ok(Some(summary))
+                    if scope == SessionListScope::AllWorkspaces
+                        || summary.workspace == self.workspace =>
+                {
+                    sessions.push(summary)
+                }
                 Ok(None) => {}
-                Err(_) => continue, // 一个损坏的库不应阻止找回其他会话。
+                Ok(Some(_)) => {}
+                Err(error) => warnings.push(format!(
+                    "会话 {} 无法读取: {:#}",
+                    path.file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("?"),
+                    error
+                )),
             }
         }
         sessions.sort_by(|a, b| {
@@ -315,7 +368,7 @@ impl SessionManager {
                 .cmp(&a.updated_at)
                 .then_with(|| b.id.cmp(&a.id))
         });
-        Ok(sessions)
+        Ok(SessionList { sessions, warnings })
     }
 
     /// 接受完整 UUID 或当前 workspace 内唯一的 UUID 前缀。
@@ -323,7 +376,7 @@ impl SessionManager {
         let id = self.resolve_id(requested_id)?;
         let next = SessionStore::open(&self.sessions_dir, &id, &self.workspace)?;
         let loaded = next.load_entries()?;
-        self.current = next;
+        self.current = CurrentSession::Open(next);
         Ok(loaded)
     }
 
@@ -367,8 +420,8 @@ impl SessionBackend for SessionManager {
         SessionManager::clear(self)
     }
 
-    fn list(&self) -> Result<Vec<SessionSummary>> {
-        SessionManager::list(self)
+    fn list(&self, scope: SessionListScope) -> Result<SessionList> {
+        SessionManager::list_scope(self, scope)
     }
 
     fn load(&mut self, requested_id: &str) -> Result<(Vec<SessionEntry>, Usage)> {
@@ -384,8 +437,7 @@ struct SessionStore {
 }
 
 impl SessionStore {
-    fn create(sessions_dir: &Path, workspace: &str) -> Result<Self> {
-        let id = uuid::Uuid::new_v4().to_string();
+    fn create(sessions_dir: &Path, workspace: &str, id: &str) -> Result<Self> {
         let path = sessions_dir.join(format!("{}.db", id));
         let mut connection = Connection::open(&path)
             .with_context(|| format!("创建会话数据库 {} 失败", path.display()))?;
@@ -398,7 +450,7 @@ impl SessionStore {
             params![id, workspace, now],
         )?;
         Ok(SessionStore {
-            id,
+            id: id.to_string(),
             connection,
             leaf_id: None,
         })
@@ -588,12 +640,12 @@ impl SessionStore {
         Ok((entries, usage))
     }
 
-    fn read_summary(path: &Path, workspace: &str) -> Result<Option<SessionSummary>> {
+    fn read_summary(path: &Path) -> Result<Option<SessionSummary>> {
         let connection = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        // 只读打开不做迁移;v1 库同样能被列出(按旧 messages 表计数)。
+        // 枚举不做迁移；read-write 打开允许 SQLite 恢复遗留 WAL 并创建 shm。
         let version = schema_version(&connection)?;
         let count_sql = if version >= ENTRIES_SCHEMA_VERSION {
             "SELECT COUNT(*) FROM entries WHERE kind = 'message'"
@@ -603,16 +655,17 @@ impl SessionStore {
         connection
             .query_row(
                 &format!(
-                    "SELECT id, title, updated_at, ({}) FROM session WHERE workspace = ?1 LIMIT 1",
+                    "SELECT id, workspace, title, updated_at, ({}) FROM session LIMIT 1",
                     count_sql
                 ),
-                [workspace],
+                [],
                 |row| {
                     Ok(SessionSummary {
                         id: row.get(0)?,
-                        title: row.get(1)?,
-                        updated_at: row.get(2)?,
-                        message_count: row.get::<_, i64>(3)? as usize,
+                        workspace: row.get(1)?,
+                        title: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        message_count: row.get::<_, i64>(4)? as usize,
                     })
                 },
             )

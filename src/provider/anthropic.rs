@@ -250,7 +250,7 @@ impl AnthropicProvider {
             }
             let Some(ev) = sse
                 .next_event()
-                .map_err(|e| ProviderError::fatal(format!("读取流失败: {}", e)))?
+                .map_err(|e| ProviderError::retryable(format!("读取流失败: {}", e)))?
             else {
                 break;
             };
@@ -258,7 +258,7 @@ impl AnthropicProvider {
                 // Messages is complete only after message_stop. Some proxies
                 // append the legacy marker, but it must not turn a truncated
                 // stream into a successful assistant message.
-                continue;
+                return Err(ProviderError::fatal("流在终止事件前收到 [DONE]"));
             }
             let data: Value = serde_json::from_str(&ev.data)
                 .map_err(|e| ProviderError::fatal(format!("流事件 JSON 无效: {}", e)))?;
@@ -390,7 +390,7 @@ impl AnthropicProvider {
         }
 
         if !saw_terminal {
-            return Err(ProviderError::fatal("流在终止事件前结束"));
+            return Err(ProviderError::retryable("流在终止事件前结束"));
         }
 
         // 防御:极端情况下(流被掐断)可能有没 stop 的半成品,按序收编

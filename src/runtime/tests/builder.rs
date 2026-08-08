@@ -18,6 +18,10 @@ fn builder_defaults_match_legacy_constructor() {
 
     assert_eq!(direct.active_selection, built.active_selection);
     assert_eq!(direct.provider_label(), built.provider_label());
+    assert_eq!(direct.max_turns, 200);
+    assert_eq!(built.max_turns, 200);
+    assert_eq!(direct.retry_policy.max_attempts, 8);
+    assert_eq!(built.retry_policy.max_attempts, 8);
     assert_eq!(
         direct
             .tools
@@ -35,6 +39,50 @@ fn builder_defaults_match_legacy_constructor() {
     assert_eq!(
         direct.build_system_prompt().system_sections,
         built.build_system_prompt().system_sections
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn builder_uses_retry_and_turn_limits_from_config() {
+    let root = temp_root("builder-config-retry");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let config_path = root.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[agent]
+provider = "mock"
+max_turns = 41
+[retry]
+max_attempts = 5
+base_delay_ms = 12
+max_delay_ms = 120
+max_retry_after_ms = 1200
+[providers.mock]
+api = "responses"
+base_url = "http://127.0.0.1:1"
+api_key = ""
+model = "scripted"
+"#,
+    )
+    .unwrap();
+    let agent = Agent::builder(
+        Config::load(&config_path).unwrap(),
+        Workspace::new(workspace_root),
+    )
+    .data_dir(root.join("data"))
+    .build()
+    .unwrap();
+
+    assert_eq!(agent.max_turns, 41);
+    assert_eq!(agent.retry_policy.max_attempts, 5);
+    assert_eq!(agent.retry_policy.base_delay, Duration::from_millis(12));
+    assert_eq!(agent.retry_policy.max_delay, Duration::from_millis(120));
+    assert_eq!(
+        agent.retry_policy.max_retry_after,
+        Duration::from_millis(1200)
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -197,7 +245,7 @@ fn invalid_root_agents_is_a_non_fatal_startup_notice() {
 
     let mut events = Vec::new();
     agent.handle_command(
-        AgentCommand::ListSessions,
+        AgentCommand::ListSessions { all: false },
         &mut |event| events.push(event),
         &AtomicBool::new(false),
     );
@@ -259,7 +307,7 @@ fn direct_in_memory_builder_needs_no_config_state_or_skills_directories() {
         &AtomicBool::new(false),
     );
     agent.handle_command(
-        AgentCommand::ListSessions,
+        AgentCommand::ListSessions { all: false },
         &mut |event| events.push(event),
         &AtomicBool::new(false),
     );
@@ -270,7 +318,9 @@ fn direct_in_memory_builder_needs_no_config_state_or_skills_directories() {
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::SessionsListed { sessions, .. }
-            if sessions.len() == 1 && sessions[0].message_count == 2
+            if sessions.len() == 1
+                && sessions[0].message_count == 2
+                && sessions[0].workspace == root.join("workspace").display().to_string()
     )));
     assert!(!state_root.exists());
     let _ = std::fs::remove_dir_all(root);
@@ -294,7 +344,7 @@ fn startup_emits_frozen_skill_catalog_once() {
     .unwrap();
     let mut events = Vec::new();
     agent.handle_command(
-        AgentCommand::ListSessions,
+        AgentCommand::ListSessions { all: false },
         &mut |event| events.push(event),
         &AtomicBool::new(false),
     );
@@ -305,7 +355,7 @@ fn startup_emits_frozen_skill_catalog_once() {
     ));
     events.clear();
     agent.handle_command(
-        AgentCommand::ListSessions,
+        AgentCommand::ListSessions { all: false },
         &mut |event| events.push(event),
         &AtomicBool::new(false),
     );

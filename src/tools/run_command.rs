@@ -195,6 +195,7 @@ impl Tool for RunCommand {
                 )));
             }
         };
+        let process_job = ProcessJob::attach(&child).ok();
 
         // 两个管道各开一个读线程,chunk 经 channel 回到执行线程。这样既避免管道死锁,
         // 又保证 progress callback 永远不会逃出 ToolContext 的同步借用期。
@@ -225,23 +226,24 @@ impl Tool for RunCommand {
                 Ok(Some(status)) => break Ending::Exited(status.code()),
                 Ok(None) => {}
                 Err(error) => {
-                    kill_tree(&mut child);
+                    kill_tree(&mut child, process_job.as_ref());
                     break Ending::WaitFailed(error.to_string());
                 }
             }
             if ctx.cancel.load(Ordering::Relaxed) {
-                kill_tree(&mut child);
+                kill_tree(&mut child, process_job.as_ref());
                 break Ending::Cancelled;
             }
             if started.elapsed() > timeout {
-                kill_tree(&mut child);
+                kill_tree(&mut child, process_job.as_ref());
                 break Ending::TimedOut(timeout.as_secs());
             }
             std::thread::sleep(Duration::from_millis(40));
         };
-        // 子进程结束后管道关闭,读线程自然退出。先回收进程,再 join 并排空 channel,
-        // 确保退出前写入的最后一批字节不会丢失。
+        // shell 正常退出后也可能遗留持有管道的后台后代。先回收 shell 并关闭 job,
+        // 再 join、排空 channel，既不遗留进程，也保留退出前的最后一批字节。
         let _ = child.wait();
+        drop(process_job);
         let stdout_read = join_pipe_reader(out_handle, "stdout");
         let stderr_read = join_pipe_reader(err_handle, "stderr");
         progress_dirty |= drain_pipe_chunks(&pipe_rx, &mut stdout, &mut stderr, usize::MAX) > 0;
@@ -496,9 +498,78 @@ fn lossy_tail(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
-/// 终止整棵进程树。Windows 用 taskkill /T,其余平台退回单进程 kill。
-fn kill_tree(child: &mut Child) {
-    if cfg!(windows) {
+#[cfg(windows)]
+struct ProcessJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ProcessJob {
+    fn attach(child: &Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let job = Self { handle };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let process = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        if unsafe { AssignProcessToJobObject(job.handle, process) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    fn terminate(&self) -> bool {
+        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1) != 0 }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct ProcessJob;
+
+#[cfg(not(windows))]
+impl ProcessJob {
+    fn attach(_child: &Child) -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// 终止整棵进程树。Windows 优先终止 Job Object，无法绑定时回退 taskkill /T。
+fn kill_tree(child: &mut Child, process_job: Option<&ProcessJob>) {
+    #[cfg(windows)]
+    let job_terminated = process_job.is_some_and(ProcessJob::terminate);
+    #[cfg(not(windows))]
+    let job_terminated = false;
+
+    if cfg!(windows) && !job_terminated {
         let _ = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .stdout(Stdio::null())
@@ -563,6 +634,23 @@ mod tests {
         assert_eq!(error.code, ToolErrorCode::Timeout);
         assert!(error.message.contains("超时"));
         assert!(t0.elapsed() < Duration::from_secs(20));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normal_exit_does_not_wait_for_background_descendants() {
+        let tool = RunCommand::new(detect_shell("auto"));
+        let command = match &tool.shell {
+            Shell::GitBash(_) | Shell::Sh => "sleep 30 &",
+            Shell::PowerShell => {
+                "Start-Process powershell -ArgumentList '-NoProfile -Command Start-Sleep 30'"
+            }
+            Shell::Cmd => "start /b ping 127.0.0.1 -n 30 > nul",
+        };
+        let started = Instant::now();
+        let result = run(&tool, json!({"command": command, "timeout_secs": 5}));
+        assert!(result.is_ok(), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

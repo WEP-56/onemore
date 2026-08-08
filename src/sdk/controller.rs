@@ -180,8 +180,19 @@ impl SessionController {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<super::SessionSummaryView>, SessionError> {
+        self.list_sessions_with_scope(false)
+    }
+
+    pub fn list_all_sessions(&self) -> Result<Vec<super::SessionSummaryView>, SessionError> {
+        self.list_sessions_with_scope(true)
+    }
+
+    fn list_sessions_with_scope(
+        &self,
+        all: bool,
+    ) -> Result<Vec<super::SessionSummaryView>, SessionError> {
         let generation = self.shared.session_list_generation()?;
-        self.submit(AgentCommand::ListSessions)?;
+        self.submit(AgentCommand::ListSessions { all })?;
         self.shared.wait_for_session_list(generation)
     }
 

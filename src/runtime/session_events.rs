@@ -72,6 +72,30 @@ impl<'a> EventAdapter<'a> {
                     command_id: command_id.to_string(),
                 })
             }
+            AgentEvent::RetryScheduled {
+                attempt,
+                max_retries,
+                delay_ms,
+                error,
+            } => {
+                self.update_phase(SessionPhase::Retrying);
+                Some(ProgressEvent::RetryScheduled {
+                    attempt,
+                    max_retries,
+                    delay_ms,
+                    error,
+                })
+            }
+            AgentEvent::RetryStarted {
+                attempt,
+                max_retries,
+            } => {
+                self.update_phase(SessionPhase::Running);
+                Some(ProgressEvent::RetryStarted {
+                    attempt,
+                    max_retries,
+                })
+            }
             AgentEvent::AssistantDelta(delta) => Some(ProgressEvent::AssistantDelta {
                 message_id: self.message_id.clone(),
                 content_index: 0,
@@ -207,6 +231,7 @@ impl<'a> EventAdapter<'a> {
                     .map(|session| SessionSummaryView {
                         id: session.id,
                         title: session.title,
+                        workspace: session.workspace,
                         message_count: session.message_count,
                         updated_at: session.updated_at,
                     })
@@ -252,6 +277,18 @@ impl<'a> EventAdapter<'a> {
         );
     }
 
+    fn update_phase(&mut self, phase: SessionPhase) {
+        *self.revision = self.revision.saturating_add(1);
+        let snapshot = self.shared.update_live(*self.revision, phase, None);
+        let _ = send_event(
+            self.events,
+            self.cancel,
+            SessionEvent::SessionSnapshot {
+                snapshot: Box::new(snapshot),
+            },
+        );
+    }
+
     fn update_queue(&mut self, command_id: String, kind: InputQueueKind, text: String) {
         *self.revision = self.revision.saturating_add(1);
         let snapshot = self
@@ -276,5 +313,104 @@ impl<'a> EventAdapter<'a> {
                 snapshot: Box::new(snapshot),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::sdk::{
+        Capabilities, ModelSelectionView, PlanView, QueueView, ServerInfo, SessionSnapshot,
+        UiMetadata, UsageView, PROTOCOL_VERSION,
+    };
+
+    fn shared() -> SessionShared {
+        SessionShared::new(
+            ServerInfo {
+                server_id: "server".into(),
+                protocol_version: PROTOCOL_VERSION,
+                capabilities: Capabilities::default(),
+                models: Vec::new(),
+            },
+            SessionSnapshot {
+                session_id: "session".into(),
+                revision: 0,
+                workspace: "workspace".into(),
+                phase: SessionPhase::Running,
+                model: ModelSelectionView {
+                    provider: "provider".into(),
+                    model: "model".into(),
+                    effort: "medium".into(),
+                    label: "provider / model".into(),
+                },
+                usage: UsageView::default(),
+                transcript: Vec::new(),
+                plan: PlanView::default(),
+                queues: QueueView::default(),
+                pending_approval: None,
+            },
+            UiMetadata {
+                provider_catalog: Vec::new(),
+                reasoning_preferences: BTreeMap::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn retry_events_publish_phase_snapshots_before_progress() {
+        let shared = shared();
+        let cancel = AtomicBool::new(false);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+        let mut revision = 0;
+        {
+            let mut adapter =
+                EventAdapter::new(Some("command"), &sender, &cancel, &shared, &mut revision);
+            adapter.emit(AgentEvent::RetryScheduled {
+                attempt: 1,
+                max_retries: 7,
+                delay_ms: 1000,
+                error: "connection reset".into(),
+            });
+            adapter.emit(AgentEvent::RetryStarted {
+                attempt: 1,
+                max_retries: 7,
+            });
+        }
+
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            &events[0],
+            SessionEvent::SessionSnapshot { snapshot }
+                if snapshot.phase == SessionPhase::Retrying && snapshot.revision == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            SessionEvent::Progress {
+                progress: ProgressEvent::RetryScheduled {
+                    attempt: 1,
+                    max_retries: 7,
+                    delay_ms: 1000,
+                    error,
+                }
+            } if error == "connection reset"
+        ));
+        assert!(matches!(
+            &events[2],
+            SessionEvent::SessionSnapshot { snapshot }
+                if snapshot.phase == SessionPhase::Running && snapshot.revision == 2
+        ));
+        assert!(matches!(
+            &events[3],
+            SessionEvent::Progress {
+                progress: ProgressEvent::RetryStarted {
+                    attempt: 1,
+                    max_retries: 7,
+                }
+            }
+        ));
+        assert_eq!(events.len(), 4);
+        assert_eq!(shared.snapshot().unwrap().phase, SessionPhase::Running);
     }
 }

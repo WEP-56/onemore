@@ -48,7 +48,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         command: SlashCommand::Session,
         name: "session",
-        description: "列出或恢复当前 workspace 的会话",
+        description: "列出或恢复会话；参数 all 显示其他 workspace",
         accepts_args: true,
     },
     CommandSpec {

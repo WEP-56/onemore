@@ -3,6 +3,7 @@ use super::{
     ReasoningEffortPolicy, EXAMPLE_CONFIG,
 };
 use crate::permission::PermissionRule;
+use std::time::Duration;
 
 fn load_config(text: &str) -> anyhow::Result<Config> {
     let root = std::env::temp_dir().join(format!(
@@ -66,6 +67,78 @@ model = "model"
     assert!(!disabled.compaction.enabled);
     assert_eq!(disabled.compaction.reserve_tokens, 1234);
     assert_eq!(disabled.compaction.keep_recent_tokens, 5678);
+}
+
+#[test]
+fn retry_and_turn_limits_have_stable_defaults_and_accept_overrides() {
+    let default = load_config(
+        r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert_eq!(default.max_turns, 200);
+    assert_eq!(default.retry_policy.max_attempts, 8);
+    assert_eq!(default.retry_policy.base_delay, Duration::from_secs(1));
+    assert_eq!(default.retry_policy.max_delay, Duration::from_secs(10));
+    assert_eq!(
+        default.retry_policy.max_retry_after,
+        Duration::from_secs(60)
+    );
+
+    let custom = load_config(
+        r#"
+[agent]
+provider = "mock"
+max_turns = 37
+[retry]
+max_attempts = 4
+base_delay_ms = 25
+max_delay_ms = 250
+max_retry_after_ms = 3000
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert_eq!(custom.max_turns, 37);
+    assert_eq!(custom.retry_policy.max_attempts, 4);
+    assert_eq!(custom.retry_policy.base_delay, Duration::from_millis(25));
+    assert_eq!(custom.retry_policy.max_delay, Duration::from_millis(250));
+    assert_eq!(custom.retry_policy.max_retry_after, Duration::from_secs(3));
+}
+
+#[test]
+fn invalid_retry_policies_are_rejected() {
+    let base = r#"
+[agent]
+provider = "mock"
+[retry]
+RETRY_SETTING
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#;
+    for (setting, expected) in [
+        ("max_attempts = 0", "max_attempts"),
+        ("base_delay_ms = 0", "base_delay_ms"),
+        ("base_delay_ms = 100\nmax_delay_ms = 99", "max_delay_ms"),
+        ("max_retry_after_ms = 0", "max_retry_after_ms"),
+    ] {
+        let error = load_config(&base.replace("RETRY_SETTING", setting)).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }
 
 #[test]

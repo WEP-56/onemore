@@ -161,7 +161,7 @@ TUI 内常用操作:
 | `/queue <内容>` | follow-up:排队后续任务,当前任务将停止时才注入，在agent运行中直接发送消息也可以“插嘴” |
 | `/compact` | 调用模型生成摘要作为 Compaction 事实;模型视图缩小,事实日志不减少 |
 | `Esc` | 取消当前轮(丢弃半截流式输出;未执行的工具调用补取消结果;清空排队输入) |
-| `/session [ID]` | 列出/恢复会话,恢复时重建全部事实(含 UI-only 提示) |
+| `/session [ID\|all]` | 默认列出/恢复当前 workspace 会话；`all` 只做跨 workspace 发现，恢复时重建全部事实(含 UI-only 提示) |
 | `/provider` | 只切换 provider，使用其默认模型，历史保留 |
 | `/model` | 只列出当前 provider 的模型；选模型后再确认思考程度，可以在配置文件中自定义思考程度名称 |
 | `/reasoning` (`/effort`) | 调整当前模型的思考程度 |
@@ -183,7 +183,8 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
   (`FailedTurn`)。两个适配器都有 EOF 断流 wire 测试锁定该行为。
 - 重试收敛为 `RetryPolicy` 纯函数:指数退避 + 确定性 jitter + 上限,
   解析 `retry-after-ms`/`retry-after`,服务器要求等待超过 60s 直接放弃;
-  "只有未产生任何流事件的失败才重试"的幂等前提不变。
+  "只有未产生任何流事件的失败才重试"的幂等前提不变。等待和重新发起分别投影为
+  `retry_scheduled` / `retry_started`，snapshot phase 同步切换 `retrying` / `running`。
 
 ### 2. 工具:从字符串到类型化管线(阶段 2)
 
@@ -251,7 +252,7 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
 
 ### 7. 结构化计划与长任务纪律
 
-- 固定 `update_plan` 工具使用完整快照与 `expected_revision` CAS；条目有稳定 ID、
+- 固定 `update_plan` 工具使用稳定 ID 的增量 patch；revision 由服务端生成，条目有稳定 ID、
   `pending / in_progress / completed` 三种状态，运行时强制最多一个 `in_progress`，
   并限制条目数与文本长度。过期 revision 和非法快照不会落库。
 - 工具通过独立 harness effect 返回状态变化；`ToolUse + PlanUpdated + ToolResult`
@@ -292,7 +293,14 @@ MCP、持久 Background/Task 系统、子代理、树形会话的 move/fork。
 
 ```toml
 [agent]
+max_turns = 200                # 单个用户任务最多连续调用模型的次数
 tool_timeout_secs = 300        # 可选:单工具执行超时,默认不限制
+
+[retry]
+max_attempts = 8               # 包含首次请求
+base_delay_ms = 1000
+max_delay_ms = 10000
+max_retry_after_ms = 60000     # 服务端要求更长等待时直接失败
 
 [compaction]
 enabled = true                 # 可关闭自动触发；手动 /compact 始终可用
@@ -336,7 +344,9 @@ workspace/provider/model 保存；切回该模型的 `default_effort` 时删除�
 ```
 
 Onemore 不读取 `~/.zerone`,也不识别 `ZERONE_HOME`,因此两个程序的配置、密钥和会话
-互不污染。每个会话仍使用独立 SQLite 数据库,并按 workspace 隔离;v1(线性
+互不污染。每个会话仍使用独立 SQLite 数据库,并按 workspace 隔离。`/session all` 可枚举
+全部 workspace 并显示所属路径，但当前 Runtime 只能加载其启动 workspace 内的会话；跨 workspace
+恢复应从对应目录重新启动。v1(线性
 messages 表)数据库在打开时自动迁移到当前 schema,迁移失败回滚、原库保持可用。
 
 ## npm 包

@@ -32,7 +32,10 @@ pub(crate) enum RequestCommand {
         effort: String,
     },
     ClearConversation,
-    ListSessions,
+    ListSessions {
+        #[serde(default)]
+        all: bool,
+    },
     LoadSession {
         session_id: String,
     },
@@ -216,5 +219,51 @@ mod tests {
             "request": {"command": "bash", "command_line": "echo no"}
         }))
         .is_err());
+    }
+
+    #[test]
+    fn list_sessions_scope_defaults_to_current_workspace() {
+        let current = serde_json::from_value::<ClientMessage>(json!({
+            "type": "request",
+            "id": "req-current",
+            "request": {"command": "list_sessions"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            current,
+            ClientMessage::Request {
+                request: RequestCommand::ListSessions { all: false },
+                ..
+            }
+        ));
+
+        let all = serde_json::from_value::<ClientMessage>(json!({
+            "type": "request",
+            "id": "req-all",
+            "request": {"command": "list_sessions", "all": true}
+        }))
+        .unwrap();
+        assert!(matches!(
+            all,
+            ClientMessage::Request {
+                request: RequestCommand::ListSessions { all: true },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn session_list_response_includes_workspace() {
+        let value = serde_json::to_value(ResponseResult::ListSessions {
+            sessions: vec![SessionSummaryView {
+                id: "session".into(),
+                title: "title".into(),
+                workspace: "E:\\project".into(),
+                message_count: 3,
+                updated_at: 4,
+            }],
+        })
+        .unwrap();
+        assert_eq!(value["sessions"][0]["workspace"], "E:\\project");
     }
 }

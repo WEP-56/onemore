@@ -88,7 +88,7 @@ fn run_worker(
     while let Ok(mut pending) = command_rx.recv() {
         let command_id = pending.command_id.clone();
         let command = pending.command.clone();
-        let is_list_sessions = matches!(command, AgentCommand::ListSessions);
+        let is_list_sessions = matches!(command, AgentCommand::ListSessions { .. });
         if let Err(error) = validate_idle_command(&command) {
             pending.reject(error);
             continue;

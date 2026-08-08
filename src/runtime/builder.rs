@@ -68,6 +68,7 @@ impl AgentBuilder {
         let shell = config.shell.clone();
         let system_prompt = config.system_prompt.clone();
         let max_turns = config.max_turns;
+        let retry_policy = config.retry_policy;
         let tool_timeout = config.tool_timeout;
         let compaction_settings = config.compaction;
         let permission_rules = config.permission_rules;
@@ -75,6 +76,7 @@ impl AgentBuilder {
         builder.shell = shell;
         builder.system_prompt = system_prompt;
         builder.max_turns = max_turns;
+        builder.retry_policy = retry_policy;
         builder.tool_timeout = tool_timeout;
         builder.compaction_settings = compaction_settings;
         builder.permission_rules = permission_rules;
@@ -100,7 +102,7 @@ impl AgentBuilder {
             workspace,
             shell: "auto".into(),
             system_prompt: None,
-            max_turns: 50,
+            max_turns: 200,
             tool_timeout: None,
             permission_rules: PermissionRules::default(),
             data_dir: None,
@@ -205,7 +207,9 @@ impl AgentBuilder {
     /// Run without Onemore state directories: facts and preferences stay in
     /// memory, and local skill discovery is disabled.
     pub fn in_memory(mut self) -> Self {
-        self.session_backend = Some(Box::new(MemorySessionBackend::new()));
+        self.session_backend = Some(Box::new(MemorySessionBackend::with_workspace(
+            self.workspace.root().display().to_string(),
+        )));
         self.model_preferences = Some(Box::new(MemoryModelPreferences::default()));
         self.skills = SkillsMode::Disabled;
         self

@@ -285,15 +285,11 @@ fn tool_turn(calls: Vec<(&str, serde_json::Value)>) -> crate::provider::TurnOutp
     )
 }
 
-fn update_plan_turn(
-    expected_revision: u64,
-    items: serde_json::Value,
-) -> crate::provider::TurnOutput {
+fn update_plan_turn(items: serde_json::Value) -> crate::provider::TurnOutput {
     tool_turn(vec![(
         "update_plan",
         serde_json::json!({
-            "expected_revision": expected_revision,
-            "plan": items,
+            "items": items,
         }),
     )])
 }

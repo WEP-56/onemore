@@ -321,7 +321,7 @@ impl ResponsesProvider {
             }
             let Some(ev) = sse
                 .next_event()
-                .map_err(|e| ProviderError::fatal(format!("读取流失败: {}", e)))?
+                .map_err(|e| ProviderError::retryable(format!("读取流失败: {}", e)))?
             else {
                 break;
             };
@@ -329,7 +329,9 @@ impl ResponsesProvider {
                 // Responses requires response.completed/incomplete/failed.
                 // The legacy marker alone carries no status or usage and must
                 // not make a truncated stream look successful.
-                continue;
+                return Err(ProviderError::fatal(
+                    "流在 response terminal 事件前收到 [DONE]",
+                ));
             }
             let data: Value = serde_json::from_str(&ev.data)
                 .map_err(|e| ProviderError::fatal(format!("流事件 JSON 无效: {}", e)))?;
@@ -446,7 +448,9 @@ impl ResponsesProvider {
         }
 
         if !saw_terminal {
-            return Err(ProviderError::fatal("流在 response terminal 事件前结束"));
+            return Err(ProviderError::retryable(
+                "流在 response terminal 事件前结束",
+            ));
         }
 
         // 流被掐断时的兜底:把半成品按序收编

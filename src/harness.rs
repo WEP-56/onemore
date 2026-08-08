@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 
 use crate::config::{ActiveModelSelection, ProviderCatalogEntry, ProviderSettings};
 use crate::message::Usage;
-use crate::session::{SessionEntry, SessionEntryPayload, SessionSummary};
+use crate::session::{SessionEntry, SessionEntryPayload, SessionList, SessionListScope};
 
 mod memory;
 mod model;
@@ -48,7 +48,7 @@ pub trait SessionBackend: Send {
         bail!("当前 session backend 不支持清空")
     }
 
-    fn list(&self) -> Result<Vec<SessionSummary>> {
+    fn list(&self, _scope: SessionListScope) -> Result<SessionList> {
         bail!("当前 session backend 不支持列出会话")
     }
 

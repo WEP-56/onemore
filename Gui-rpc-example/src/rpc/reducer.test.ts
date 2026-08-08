@@ -47,6 +47,28 @@ function serverInfo(): ServerInfo {
 }
 
 describe("reducer：流式增量组装", () => {
+  it("结构化重试进度保留原因和等待时间", () => {
+    const scheduled = applyEvent(freshViewState(), {
+      type: "progress",
+      progress: {
+        type: "retry_scheduled",
+        attempt: 2,
+        max_retries: 7,
+        delay_ms: 1500,
+        error: "connection reset",
+      },
+    });
+    const notice = scheduled.liveNotices[scheduled.liveNotices.length - 1];
+    expect(notice?.text).toContain("connection reset");
+    expect(notice?.text).toContain("1.5s");
+
+    const started = applyEvent(scheduled, {
+      type: "progress",
+      progress: { type: "retry_started", attempt: 2, max_retries: 7 },
+    });
+    expect(started.liveNotices).toEqual(scheduled.liveNotices);
+  });
+
   it("assistant_delta 按序累积，字符数统计正确", () => {
     const s0 = freshViewState();
     const s1 = applyEvent(s0, {

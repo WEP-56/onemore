@@ -114,6 +114,8 @@ backend 向前端发送单一事件流，例如 `onemore://rpc-event`。payload 
   `command_finished`。
 - `command_id` 关联 mutation 与后续终态，request `id` 只关联一次 response。
 - `session_snapshot` 是权威值。progress 可以即时渲染，但 snapshot 到达时必须纠正本地组装状态。
+- `retry_scheduled` / `retry_started` 是重试的结构化瞬时状态；对应 snapshot phase 分别为
+  `retrying` / `running`，不得从 Notice 文本推断重试。
 - `settled` 只用于表示当前 session 已回到稳定边界，不能代替具体 command terminal。
 - GUI 不缓存 provider raw、thinking raw、工具原始参数或任意 details。
 - 未知 version、tag、必填字段缺失和重复 response 都进入明确 transport error，不静默忽略。
@@ -147,6 +149,10 @@ system prompt、compaction prompt、SQLite 路径。
 - steering/follow-up queues
 - pending approval summary/reason/scopes
 -最近一次错误的稳定 code/message
+- 当前 retry 次数、等待时长和失败原因
+
+会话摘要包含 `workspace`。GUI 默认请求 `list_sessions { all: false }` 并只允许加载当前
+workspace；诊断工具可用 `all: true` 做全局发现，但跨 workspace 恢复必须在目标目录重新连接。
 
 ## 7. 界面结构
 
@@ -234,7 +240,7 @@ system prompt、compaction prompt、SQLite 路径。
 
 ### 9.3 观测指标
 
-- 总 elapsed、idle/running/waiting approval 各阶段时长
+- 总 elapsed、idle/running/retrying/waiting approval 各阶段时长
 - 收到的 session/progress/terminal/settled 数量
 - assistant delta 字符数
 - tool started/finished 数和未闭合 tool call 数；正常结束时必须为 0

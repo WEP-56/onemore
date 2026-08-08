@@ -11,12 +11,9 @@ fn plan_events_and_success_finish_are_emitted_after_commit() {
     )
     .unwrap();
     agent.provider = Box::new(ScriptedProvider::new(vec![
-        ScriptStep::Output(update_plan_turn(
-            0,
-            serde_json::json!([
-                {"id": "done", "text": "Already complete", "status": "completed"}
-            ]),
-        )),
+        ScriptStep::Output(update_plan_turn(serde_json::json!([
+            {"id": "done", "text": "Already complete", "status": "completed"}
+        ]))),
         ScriptStep::Output(output(
             ChatMessage {
                 role: Role::Assistant,
@@ -90,12 +87,9 @@ fn active_plan_triggers_only_one_continuation_reminder() {
     .unwrap();
     agent.provider = Box::new(ScriptedProvider::with_prompt_log(
         vec![
-            ScriptStep::Output(update_plan_turn(
-                0,
-                serde_json::json!([
-                    {"id": "work", "text": "Do the work", "status": "in_progress"}
-                ]),
-            )),
+            ScriptStep::Output(update_plan_turn(serde_json::json!([
+                {"id": "work", "text": "Do the work", "status": "in_progress"}
+            ]))),
             ScriptStep::Output(output(
                 ChatMessage {
                     role: Role::Assistant,
@@ -153,12 +147,9 @@ fn cancellation_returns_in_progress_item_to_pending_as_a_new_fact() {
     )
     .unwrap();
     agent.provider = Box::new(ScriptedProvider::new(vec![
-        ScriptStep::Output(update_plan_turn(
-            0,
-            serde_json::json!([
-                {"id": "work", "text": "Do the work", "status": "in_progress"}
-            ]),
-        )),
+        ScriptStep::Output(update_plan_turn(serde_json::json!([
+            {"id": "work", "text": "Do the work", "status": "in_progress"}
+        ]))),
         ScriptStep::Cancel,
     ]));
     let mut events = Vec::new();

@@ -246,6 +246,7 @@ pub struct CommandErrorView {
 pub struct SessionSummaryView {
     pub id: String,
     pub title: String,
+    pub workspace: String,
     pub message_count: usize,
     pub updated_at: i64,
 }
@@ -292,6 +293,16 @@ pub enum ProgressEvent {
     },
     RunStarted {
         command_id: String,
+    },
+    RetryScheduled {
+        attempt: u32,
+        max_retries: u32,
+        delay_ms: u64,
+        error: String,
+    },
+    RetryStarted {
+        attempt: u32,
+        max_retries: u32,
     },
     AssistantDelta {
         message_id: String,

@@ -146,6 +146,17 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
   switch (p.type) {
     case "run_started":
       return { ...state, run: { commandId: p.command_id, startedAt: now() } };
+    case "retry_scheduled": {
+      const n: LiveNotice = {
+        key: `retry:${p.attempt}:${now()}`,
+        level: "info",
+        text: `${p.error}，${(p.delay_ms / 1000).toFixed(1)}s 后重试(${p.attempt}/${p.max_retries})`,
+        at: now(),
+      };
+      return { ...state, liveNotices: [...state.liveNotices, n].slice(-50) };
+    }
+    case "retry_started":
+      return state;
     case "assistant_delta": {
       const key = `${p.message_id}:${p.content_index}:${p.kind}`;
       const prev = state.liveStreams[key];

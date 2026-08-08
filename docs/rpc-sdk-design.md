@@ -87,6 +87,7 @@ impl SessionController {
     pub fn set_model(&self, selection: ModelSelection) -> Result<CommandReceipt, SessionError>;
     pub fn clear_conversation(&self) -> Result<CommandReceipt, SessionError>;
     pub fn list_sessions(&self) -> Result<Vec<SessionSummaryView>, SessionError>;
+    pub fn list_all_sessions(&self) -> Result<Vec<SessionSummaryView>, SessionError>;
     pub fn load_session(&self, id: impl Into<String>) -> Result<CommandReceipt, SessionError>;
     pub fn list_models(&self) -> Result<Vec<ModelMetadata>, SessionError>;
 
@@ -288,7 +289,23 @@ assistant block 首版只包含：
 如果以后确实需要结构化 tool details，必须为具体公共字段建立稳定 DTO 和清洗规则，不能直接把
 `serde_json::Value` 穿透到协议。
 
-### 5.4 ApprovalRequestView
+### 5.4 SessionSummaryView
+
+```text
+SessionSummaryView
+  id: String
+  title: String
+  workspace: String
+  message_count: usize
+  updated_at: i64
+```
+
+`list_sessions()` 与 RPC `list_sessions` 默认只返回当前 workspace。`list_all_sessions()` 或
+`list_sessions { all: true }` 用于跨 workspace 发现，摘要必须携带 `workspace`。当前 Runtime 的
+workspace、项目指令和权限根在启动时冻结，因此跨 workspace 摘要不可直接传给 `load_session`；
+调用方应在目标 workspace 启动新的 Runtime。
+
+### 5.5 ApprovalRequestView
 
 ```text
 ApprovalRequestView
@@ -308,7 +325,7 @@ ApprovalDecisionView
 审批只暴露当前权限系统已经生成的 summary 和 reason，不补充原始工具参数。RPC 输入结束、输出
 断开、client 退出或审批响应通道关闭时，一律按 deny 收尾，并产生 ToolResult。
 
-### 5.5 SessionEvent
+### 5.6 SessionEvent
 
 事件分为权威状态和瞬时进度：
 
@@ -324,6 +341,8 @@ CommandStatus
 
 ProgressEvent
   run_started { command_id }
+  retry_scheduled { attempt, max_retries, delay_ms, error }
+  retry_started { attempt, max_retries }
   assistant_delta { message_id, content_index, kind, delta }
   tool_started { tool_call_id, name, summary }
   tool_updated { tool_call_id, name, output }
@@ -336,6 +355,8 @@ ProgressEvent
 约束：
 
 - delta 只携带新增片段，不携带累计 assistant message。
+- `retry_scheduled` 前先发布 phase=`retrying` 的 snapshot；`retry_started` 前先恢复
+  phase=`running`，客户端无需从 Notice 文本猜测重试状态。
 - `session_snapshot.transcript` 和最终 transcript item 是权威值；客户端可用它纠正 delta 组装。
 - streaming 中尚未完成的工具参数不进入 snapshot，也绝不能执行。
 - tool progress 到达 `tool_finished` 后关闭，迟到更新必须忽略。
@@ -422,7 +443,7 @@ abort
 compact
 set_model { provider, model, effort }
 clear_conversation
-list_sessions
+list_sessions { all?: bool }
 load_session { session_id }
 list_models
 get_snapshot
@@ -435,6 +456,8 @@ shutdown
 
 query 命令在 response 的 `result` 中返回数据，不产生 `command_id`。mutation 命令返回
 `command_id`，完成状态通过事件报告。`shutdown` 成功 response flush 后再退出。
+`list_sessions` 省略 `all` 时等价于 `all: false`；`all: true` 只扩展枚举范围，不放宽
+`load_session` 的 workspace 限制。
 
 ### 6.5 背压和断连
 

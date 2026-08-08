@@ -123,6 +123,57 @@ fn oversized_retry_after_fails_without_waiting() {
 }
 
 #[test]
+fn retry_emits_structured_schedule_and_start_events() {
+    let root = temp_root("structured-retry");
+    let mut agent = Agent::new_with_data_dir(
+        config(&root),
+        Workspace::new(root.clone()),
+        root.join("data"),
+    )
+    .unwrap();
+    agent.retry_policy = RetryPolicy {
+        max_attempts: 2,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        max_retry_after: Duration::from_secs(1),
+        jitter_seed: 0,
+    };
+    agent.provider = Box::new(ScriptedProvider::new(vec![
+        ScriptStep::Error(ProviderError::retryable("connection reset")),
+        ScriptStep::Output(output(
+            ChatMessage {
+                role: Role::Assistant,
+                blocks: vec![Block::Text("recovered".into())],
+            },
+            StopReason::EndTurn,
+        )),
+    ]));
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::UserInput("hi".into()),
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryScheduled {
+            attempt: 1,
+            max_retries: 1,
+            error,
+            ..
+        } if error.contains("connection reset")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RetryStarted {
+            attempt: 1,
+            max_retries: 1
+        }
+    )));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn steering_is_injected_only_after_full_tool_batch() {
     let root = temp_root("steering");
     let mut agent = Agent::new_with_data_dir(

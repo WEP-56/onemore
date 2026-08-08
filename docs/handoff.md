@@ -316,3 +316,47 @@ $env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
 
 RPC v1 之后再评估轻量插件协议。第一版插件只应覆盖已有真实扩展点：tools、context、hooks、
 model registry，不提前引入包管理或另一条 agent 执行路径。
+
+## 当前阶段：长任务第一、二批稳定性修复
+
+已完成：
+
+- Provider 请求默认最多 8 次尝试，退避为 1s 起步、10s 封顶，`Retry-After` 上限 60s；
+  `[retry]` 可配置全部边界。自动重放仍严格限制在尚未产生任何流事件时。
+- SSE 读取错误和未明确结束的 EOF 归为 retryable；明确 `[DONE]` 却缺少 provider terminal
+  归为 fatal 协议错误。SDK/RPC 新增 `retry_scheduled` / `retry_started`，snapshot phase
+  按 `retrying` / `running` 投影，TUI 与 GUI 都消费结构化状态。
+- `update_plan` 改为按稳定 ID 的增量 `items` patch；已有条目只传变化字段，新条目必须传
+  `text`，删除用 `remove: true`，清空用 `clear: true`。revision 只由服务端递增，落库仍是
+  完整 `PlanUpdated` 快照，ToolUse/PlanUpdated/ToolResult 原子提交路径不变。
+- session 数据库延迟到首个事实成功提交时创建。枚举以 read-write/no-mutex 打开 SQLite，
+  允许恢复遗留 WAL；损坏库产生 warning，不再静默消失。
+- `/session` 和 `list_sessions` 默认保持当前 workspace；`/session all`、
+  `list_all_sessions()`、RPC `list_sessions { all: true }` 可发现其他 workspace，摘要携带
+  `workspace`。跨 workspace 仍不可在冻结权限根的 Runtime 中直接加载。
+- Windows `run_command` 使用 Job Object 管理完整进程树，超时、取消和 shell 正常退出都会在
+  join 管道线程前回收后代，修复 Git Bash 子进程持有 pipe 导致超时实际等待 30s 的问题。
+- CLI、Config 和嵌入 Builder 的 `max_turns` 默认统一为 200。
+
+本阶段完整验收结果：
+
+```text
+cargo test --locked
+  206 unit + 1 RPC subprocess + 8 provider wire tests passed
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all --check
+$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps
+git diff --check
+
+Gui-rpc-example:
+npm test
+  12 reducer tests passed
+npm run build
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+  12 tests passed
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+```
+
+Cargo 的 incremental hard-link 警告仍是当前 Windows 文件系统自动退回复制的环境提示，不是
+代码或 Clippy 告警。当前工作区未提交；不要创建 commit，除非用户明确要求。

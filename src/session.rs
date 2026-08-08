@@ -142,7 +142,7 @@ impl PlanReminderRecord {
     fn model_message(self) -> ChatMessage {
         let text = match self.reason {
             PlanReminderReason::Continue => format!(
-                "[Plan reminder] Plan revision {} still has active items. Continue the work. If the work is actually finished, call update_plan with the complete current snapshot before giving the final response.",
+                "[Plan reminder] Plan revision {} still has active items. Continue the work. If the work is actually finished, call update_plan with incremental status patches before giving the final response.",
                 self.revision
             ),
             PlanReminderReason::Cancelled => format!(
@@ -169,9 +169,32 @@ pub struct SessionSnapshot {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    pub workspace: String,
     /// Number of message facts, excluding UI and control facts.
     pub message_count: usize,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionListScope {
+    CurrentWorkspace,
+    AllWorkspaces,
+}
+
+impl From<bool> for SessionListScope {
+    fn from(all: bool) -> Self {
+        if all {
+            SessionListScope::AllWorkspaces
+        } else {
+            SessionListScope::CurrentWorkspace
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionList {
+    pub sessions: Vec<SessionSummary>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

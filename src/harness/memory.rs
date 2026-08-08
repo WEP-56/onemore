@@ -6,7 +6,8 @@ use anyhow::{bail, Result};
 use crate::message::{Block, Role, Usage};
 use crate::plan::validate_plan_append;
 use crate::session::{
-    validate_new_message_batch, SessionEntry, SessionEntryPayload, SessionSummary,
+    validate_new_message_batch, SessionEntry, SessionEntryPayload, SessionList, SessionListScope,
+    SessionSummary,
 };
 
 use super::{ModelPreferences, SessionBackend};
@@ -14,6 +15,7 @@ use super::{ModelPreferences, SessionBackend};
 /// One-session, append-only backend for embedded and test runtimes.
 pub struct MemorySessionBackend {
     id: String,
+    workspace: String,
     title: String,
     entries: Vec<SessionEntry>,
     usage: Usage,
@@ -24,11 +26,18 @@ impl MemorySessionBackend {
     pub fn new() -> Self {
         MemorySessionBackend {
             id: uuid::Uuid::new_v4().to_string(),
+            workspace: String::new(),
             title: String::new(),
             entries: Vec::new(),
             usage: Usage::default(),
             updated_at: unix_timestamp(),
         }
+    }
+
+    pub fn with_workspace(workspace: impl Into<String>) -> Self {
+        let mut backend = Self::new();
+        backend.workspace = workspace.into();
+        backend
     }
 }
 
@@ -86,17 +95,21 @@ impl SessionBackend for MemorySessionBackend {
         Ok(())
     }
 
-    fn list(&self) -> Result<Vec<SessionSummary>> {
-        Ok(vec![SessionSummary {
-            id: self.id.clone(),
-            title: self.title.clone(),
-            message_count: self
-                .entries
-                .iter()
-                .filter(|entry| matches!(entry.payload, SessionEntryPayload::Message(_)))
-                .count(),
-            updated_at: self.updated_at,
-        }])
+    fn list(&self, _scope: SessionListScope) -> Result<SessionList> {
+        Ok(SessionList {
+            sessions: vec![SessionSummary {
+                id: self.id.clone(),
+                title: self.title.clone(),
+                workspace: self.workspace.clone(),
+                message_count: self
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(entry.payload, SessionEntryPayload::Message(_)))
+                    .count(),
+                updated_at: self.updated_at,
+            }],
+            warnings: Vec::new(),
+        })
     }
 
     fn load(&mut self, requested_id: &str) -> Result<(Vec<SessionEntry>, Usage)> {
@@ -217,7 +230,12 @@ mod tests {
             )
             .unwrap();
 
-        let summary = backend.list().unwrap().pop().unwrap();
+        let summary = backend
+            .list(SessionListScope::CurrentWorkspace)
+            .unwrap()
+            .sessions
+            .pop()
+            .unwrap();
         assert_eq!(summary.title, "hello");
         assert_eq!(summary.message_count, 1);
         backend.clear().unwrap();

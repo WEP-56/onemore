@@ -123,8 +123,90 @@ fn sessions_are_scoped_to_workspace() {
     let first_manager = SessionManager::create(sessions.clone(), &first).unwrap();
     let first_id = first_manager.current_id().to_string();
     let mut second_manager = SessionManager::create(sessions, &second).unwrap();
-    assert_eq!(second_manager.list().unwrap().len(), 1);
+    assert!(second_manager.list().unwrap().is_empty());
     assert!(second_manager.load(&first_id).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn global_listing_includes_workspaces_but_loading_stays_scoped() {
+    let root = temp_root("global-list");
+    let first = root.join("first");
+    let second = root.join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let sessions = root.join("sessions");
+    let mut first_manager = SessionManager::create(sessions.clone(), &first).unwrap();
+    first_manager
+        .append_payloads(
+            vec![message_payload(ChatMessage::user_text("first"))],
+            Usage::default(),
+        )
+        .unwrap();
+    let first_id = first_manager.current_id().to_string();
+    let mut second_manager = SessionManager::create(sessions, &second).unwrap();
+    second_manager
+        .append_payloads(
+            vec![message_payload(ChatMessage::user_text("second"))],
+            Usage::default(),
+        )
+        .unwrap();
+
+    assert_eq!(second_manager.list().unwrap().len(), 1);
+    let all = second_manager
+        .list_scope(SessionListScope::AllWorkspaces)
+        .unwrap();
+    assert_eq!(all.sessions.len(), 2);
+    assert!(all
+        .sessions
+        .iter()
+        .all(|session| !session.workspace.is_empty()));
+    assert!(second_manager.load(&first_id).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn closed_wal_session_is_listed_without_existing_sidecars() {
+    let root = temp_root("closed-wal-list");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = root.join("sessions");
+    let id = {
+        let mut manager = SessionManager::create(sessions.clone(), &workspace).unwrap();
+        manager
+            .append_payloads(
+                vec![message_payload(ChatMessage::user_text("persisted"))],
+                Usage::default(),
+            )
+            .unwrap();
+        manager.current_id().to_string()
+    };
+    assert!(!sessions.join(format!("{id}.db-shm")).exists());
+    let manager = SessionManager::create(sessions, &workspace).unwrap();
+    assert!(manager
+        .list()
+        .unwrap()
+        .iter()
+        .any(|session| session.id == id));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_database_is_created_only_after_first_fact_commit() {
+    let root = temp_root("lazy-create");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let sessions = root.join("sessions");
+    let mut manager = SessionManager::create(sessions.clone(), &workspace).unwrap();
+    let path = sessions.join(format!("{}.db", manager.current_id()));
+    assert!(!path.exists());
+    manager
+        .append_payloads(
+            vec![message_payload(ChatMessage::user_text("materialize"))],
+            Usage::default(),
+        )
+        .unwrap();
+    assert!(path.exists());
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -51,8 +51,8 @@ pub enum AgentCommand {
     },
     /// 只调整当前模型的思考程度(/reasoning 或 /effort)。
     SetReasoningEffort(String),
-    /// 列出当前 workspace 的历史会话(/session)。
-    ListSessions,
+    /// 列出历史会话；all=true 时包含其他 workspace 但仍不可直接加载。
+    ListSessions { all: bool },
     /// 恢复当前 workspace 的一个历史会话(`/session <id>`)。
     LoadSession(String),
     /// 退出:Runtime 线程收到后结束自己。活动运行中到达时会请求取消当前轮。
@@ -74,6 +74,19 @@ pub enum AgentEvent {
 
     /// 一轮开始:模型开始处理。
     TurnStarted,
+
+    /// A transient provider failure is waiting before another request attempt.
+    RetryScheduled {
+        attempt: u32,
+        max_retries: u32,
+        delay_ms: u64,
+        error: String,
+    },
+    /// The retry backoff completed and the next provider request is starting.
+    RetryStarted {
+        attempt: u32,
+        max_retries: u32,
+    },
 
     /// 助手文本增量(streaming)。前端应把它追加到"当前助手消息"。
     AssistantDelta(String),

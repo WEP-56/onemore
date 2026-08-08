@@ -303,10 +303,14 @@ fn commit_failure_stops_memory_advance_and_reports() {
     assert!(events
         .iter()
         .any(|event| matches!(event, AgentEvent::Error(text) if text.contains("保存会话失败"))));
-    // 内存镜像与磁盘一致:双方都是空。
+    // 内存镜像为空；lazy session 在首次成功提交前不物化空数据库。
     assert!(agent.entries.is_empty());
     let id = agent.session_id().to_string();
-    let (disk_entries, _) = agent.sessions.load(&id).unwrap();
-    assert!(disk_entries.is_empty());
+    assert!(agent.sessions.load(&id).is_err());
+    assert!(!root
+        .join("data")
+        .join("sessions")
+        .join(format!("{id}.db"))
+        .exists());
     let _ = std::fs::remove_dir_all(root);
 }

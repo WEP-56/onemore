@@ -178,12 +178,20 @@ impl Agent {
                     run: None,
                 }
             }
-            AgentCommand::ListSessions => {
-                match self.sessions.list() {
-                    Ok(sessions) => emit(AgentEvent::SessionsListed {
-                        current_id: self.sessions.current_id().to_string(),
-                        sessions,
-                    }),
+            AgentCommand::ListSessions { all } => {
+                match self
+                    .sessions
+                    .list(crate::session::SessionListScope::from(all))
+                {
+                    Ok(listing) => {
+                        for warning in listing.warnings {
+                            emit(AgentEvent::Notice(warning));
+                        }
+                        emit(AgentEvent::SessionsListed {
+                            current_id: self.sessions.current_id().to_string(),
+                            sessions: listing.sessions,
+                        })
+                    }
                     Err(e) => emit(AgentEvent::Error(format!("读取会话列表失败: {:#}", e))),
                 }
                 HandleReport {
