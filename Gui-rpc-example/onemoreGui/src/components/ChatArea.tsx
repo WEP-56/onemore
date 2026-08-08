@@ -1,11 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "@/app/store";
 import type { AssistantBlock, TranscriptItem } from "@/rpc/protocol";
 import type { LiveStream } from "@/app/types";
-import { formatTokens, phaseLabel } from "@/app/util";
 import {
-  Send,
-  Square,
   ChevronDown,
   ChevronRight,
   Wrench,
@@ -13,17 +10,22 @@ import {
   XCircle,
   Loader2,
   FolderOpen,
+  Copy,
+  Check,
+  ArrowDown,
+  Brain,
+  Info,
+  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const RUNNING_PHASES = ["running", "retrying", "compacting", "waiting_approval"];
+import { Markdown } from "@/components/Markdown";
+import Composer from "@/components/Composer";
 
 export default function ChatArea() {
   const conn = useStore((s) => s.conn);
   if (conn === "disconnected") return <WelcomeScreen />;
   return (
     <main className="flex min-w-0 flex-1 flex-col" style={{ background: "var(--surface-messages)" }}>
-      <ChatHeader />
       <Transcript />
       <Composer />
     </main>
@@ -110,50 +112,6 @@ function WelcomeScreen() {
   );
 }
 
-function ChatHeader() {
-  const snapshot = useStore((s) => s.snapshot);
-  const server = useStore((s) => s.server);
-  const phase = snapshot?.phase ?? "idle";
-  const usage = snapshot?.usage;
-  const model = snapshot?.model;
-
-  return (
-    <header
-      className="flex h-10 shrink-0 items-center gap-2.5 px-4 text-[13px]"
-      style={{ background: "var(--surface-topbar)", borderBottom: "1px solid var(--border-subtle)" }}
-    >
-      {model && (
-        <span className="max-w-[200px] truncate text-[var(--text-muted)]" title={model.label}>
-          {model.label}
-        </span>
-      )}
-      <span
-        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs"
-        style={{
-          border: "1px solid var(--border-strong)",
-          background: "var(--surface-messages)",
-          color: "var(--text-muted)",
-        }}
-      >
-        <span
-          className={cn("h-1.5 w-1.5 rounded-full", RUNNING_PHASES.includes(phase) && "animate-[dotPulse_1.2s_ease-in-out_infinite]")}
-          style={{
-            background: phase === "waiting_approval" ? "var(--status-warning)" : RUNNING_PHASES.includes(phase) ? "var(--status-success)" : "var(--text-faint)",
-          }}
-        />
-        {phaseLabel(phase)}
-      </span>
-      {usage && (
-        <span className="mono text-xs text-[var(--text-faint)]">
-          in {formatTokens(usage.input_tokens)} · out {formatTokens(usage.output_tokens)}
-        </span>
-      )}
-      <div className="flex-1" />
-      {server && <span className="mono text-xs text-[var(--text-faint)]">rev {snapshot?.revision ?? 0}</span>}
-    </header>
-  );
-}
-
 function Transcript() {
   const snapshot = useStore((s) => s.snapshot);
   const liveStreams = useStore((s) => s.liveStreams);
@@ -161,10 +119,12 @@ function Transcript() {
   const liveUsers = useStore((s) => s.liveUsers);
   const liveNotices = useStore((s) => s.liveNotices);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
 
   const nodes = useMemo(() => {
-    const out: { key: string; node: React.ReactNode }[] = [];
+    const out: { key: string; node: ReactNode }[] = [];
     for (const item of snapshot?.transcript ?? [])
       out.push({ key: `t:${tk(item)}`, node: <ItemView item={item} /> });
     for (const u of Object.values(liveUsers))
@@ -190,28 +150,46 @@ function Transcript() {
   }, [snapshot, liveStreams, liveTools, liveUsers, liveNotices]);
 
   useEffect(() => {
-    if (follow) scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [nodes.length, follow]);
+    if (follow && nodes.length > 0) {
+      scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [nodes.length, follow, nodes[nodes.length - 1]?.key]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    setFollow(nearBottom);
+    setShowScrollBtn(!nearBottom);
+  };
+
+  const scrollToBottom = () => {
+    setFollow(true);
+    scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  };
 
   return (
-    <div
-      className="flex flex-1 flex-col gap-1 overflow-y-auto py-4"
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 160);
-      }}
-    >
-      {nodes.length === 0 && (
-        <div className="m-auto max-w-md px-5 py-5 text-center text-[var(--text-faint)]">
-          输入消息开始对话。Onemore 会根据工作区内容自动理解上下文。
+    <div className="messages-shell">
+      <div className="messages-scroll" ref={shellRef} onScroll={handleScroll}>
+        <div className="messages-inner">
+          {nodes.length === 0 && (
+            <div className="m-auto max-w-md px-5 py-16 text-center text-[var(--text-faint)]">
+              输入消息开始对话。Onemore 会根据工作区内容自动理解上下文。
+            </div>
+          )}
+          {nodes.map((n) => (
+            <div key={n.key}>{n.node}</div>
+          ))}
+          <div ref={scrollRef} />
         </div>
-      )}
-      {nodes.map((n) => (
-        <div key={n.key} className="px-6">
-          {n.node}
-        </div>
-      ))}
-      <div ref={scrollRef} />
+      </div>
+      <button
+        type="button"
+        className={cn("scroll-bottom-btn", showScrollBtn && "is-visible")}
+        title="回到底部"
+        onClick={scrollToBottom}
+      >
+        <ArrowDown size={15} />
+      </button>
     </div>
   );
 }
@@ -236,66 +214,113 @@ function ItemView({ item }: { item: TranscriptItem }) {
 
 function UserView({ text }: { text: string }) {
   return (
-    <div className="flex gap-3 py-2">
-      <div
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold"
-        style={{ background: "var(--surface-card)", border: "1px solid var(--border-strong)", color: "var(--status-success)" }}
-      >
-        你
+    <div className="message user">
+      <div className="message-body">
+        <div className="message-bubble-user">{text}</div>
       </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5 pt-1">
-        <div className="whitespace-pre-wrap break-words text-[var(--text-muted)]" style={{ lineHeight: 1.55 }}>
-          {text}
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="message-action-button"
+      title="复制"
+      onClick={() => {
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? <Check size={13} className="text-[var(--status-success)]" /> : <Copy size={13} />}
+    </button>
+  );
+}
+
+function AssistantView({ blocks, streaming }: { blocks: AssistantBlock[]; streaming: boolean }) {
+  const plainText = useMemo(
+    () =>
+      blocks
+        .filter((b) => b.type === "text")
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .join("\n"),
+    [blocks],
+  );
+
+  return (
+    <div className="message assistant">
+      <div className="message-assistant">
+        <div className="message-avatar assistant">
+          <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "var(--status-success)" }} />
+        </div>
+        <div className="message-assistant-content">
+          {blocks.length === 0 && streaming && (
+            <span className="inline-block h-4 w-0.5 animate-[caretPulse_1s_ease-in-out_infinite]" style={{ background: "var(--status-success)" }} />
+          )}
+          {blocks.map((b, i) => {
+            if (b.type === "thinking") return <ThinkingBlock key={i} text={b.text} live={streaming && i === blocks.length - 1} />;
+            if (b.type === "tool_call") {
+              return (
+                <div key={i} className="tool-card">
+                  <div className="tool-card-header" style={{ cursor: "default" }}>
+                    <span className="tool-card-status" style={{ color: "var(--status-success)" }}>
+                      <Wrench size={13} />
+                    </span>
+                    <span className="tool-card-name">{b.name}</span>
+                    <span className="tool-card-summary">{b.summary}</span>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div key={i}>
+                <Markdown value={b.text} />
+                {streaming && i === blocks.length - 1 && (
+                  <span className="ml-0.5 inline-block h-4 w-0.5 animate-[caretPulse_1s_ease-in-out_infinite] align-[-2px]" style={{ background: "var(--status-success)" }} />
+                )}
+              </div>
+            );
+          })}
+          {plainText && (
+            <div className="message-action-bar">
+              <CopyButton text={plainText} />
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function AssistantView({ blocks, streaming }: { blocks: AssistantBlock[]; streaming: boolean }) {
-  return (
-    <div className="flex gap-3 py-2">
-      <div
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
-        style={{ background: "rgba(120,235,190,0.12)", border: "1px solid var(--status-success)" }}
-      >
-        <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: "var(--status-success)" }} />
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5 pt-1">
-        {blocks.length === 0 && streaming && <span className="inline-block h-4 w-0.5 animate-[caretPulse_1s_ease-in-out_infinite]" style={{ background: "var(--status-success)" }} />}
-        {blocks.map((b, i) =>
-          b.type === "text" ? (
-            <div key={i} className="whitespace-pre-wrap break-words" style={{ lineHeight: 1.55 }}>
-              {b.text}
-              {streaming && i === blocks.length - 1 && (
-                <span className="ml-0.5 inline-block h-4 w-0.5 animate-[caretPulse_1s_ease-in-out_infinite] align-[-2px]" style={{ background: "var(--status-success)" }} />
-              )}
-            </div>
-          ) : b.type === "thinking" ? (
-            <Thinking key={i} text={b.text} />
-          ) : (
-            <div key={i} className="inline-flex items-center gap-1.5 self-start rounded-full px-2.5 py-0.5 text-xs text-[var(--text-muted)]" style={{ border: "1px solid var(--border-strong)" }}>
-              <Wrench size={12} />
-              <span className="mono">{b.name}</span>
-              <span className="text-[var(--text-faint)]">{b.summary}</span>
-            </div>
-          ),
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Thinking({ text }: { text: string }) {
+function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   const [open, setOpen] = useState(false);
-  if (!text.trim()) return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const isLive = live && !open;
   return (
-    <div className="pl-2.5" style={{ borderLeft: "2px solid var(--border-strong)" }}>
-      <button type="button" className="flex items-center gap-1 py-0.5 text-xs text-[var(--text-faint)] hover:text-[var(--text-muted)]" onClick={() => setOpen(!open)}>
+    <div className={cn("thinking-block", open && "is-expanded", live && "is-live")}>
+      <button
+        type="button"
+        className="thinking-header"
+        onClick={() => setOpen(!open)}
+      >
+        <Brain size={14} className="shrink-0" style={{ color: "var(--text-subtle)" }} />
+        <span className="thinking-title">
+          {isLive ? "思考中…" : open ? "收起思考" : `思考 ${trimmed.length} 字`}
+        </span>
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        思考 {text.length} 字
       </button>
-      {open && <div className="mt-1 whitespace-pre-wrap text-[13px] text-[var(--text-muted)]">{text}</div>}
+      {open && (
+        <div className="thinking-content">
+          <div className="thinking-content-inner">
+            <Markdown value={trimmed} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -304,21 +329,21 @@ function ToolView({ item }: { item: Extract<TranscriptItem, { type: "tool" }> })
   const [open, setOpen] = useState(false);
   const ok = item.status === "succeeded";
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px]" style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-card)" }}>
-      <span style={{ color: ok ? "var(--status-success)" : "var(--status-error)" }}>
-        {ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
-      </span>
-      <span className="mono font-semibold">{item.name}</span>
-      <span className="flex-1 truncate text-[var(--text-muted)]">{item.summary}</span>
-      {item.output && (
-        <button type="button" className="text-xs transition-colors hover:text-[var(--text-strong)]" style={{ color: "var(--status-success)" }} onClick={() => setOpen(!open)}>
-          {open ? "收起" : "展开"}
-        </button>
-      )}
+    <div className={cn("tool-card", !ok && "is-failed")}>
+      <div className="tool-card-header" onClick={() => item.output && setOpen(!open)}>
+        <span className="tool-card-status" style={{ color: ok ? "var(--status-success)" : "var(--status-error)" }}>
+          {ok ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+        </span>
+        <span className="tool-card-name">{item.name}</span>
+        {item.summary && <span className="tool-card-summary">{item.summary}</span>}
+        {item.output && (
+          <ChevronDown size={13} className={cn("tool-card-chevron", open && "is-open")} />
+        )}
+      </div>
       {open && item.output && (
-        <pre className="mono mt-1 w-full overflow-auto whitespace-pre-wrap break-words rounded p-2 text-xs" style={{ background: "var(--surface-messages)", border: "1px solid var(--border-subtle)", maxHeight: 240 }}>
-          {item.output}
-        </pre>
+        <div className="tool-card-output">
+          <pre>{item.output}</pre>
+        </div>
       )}
     </div>
   );
@@ -326,111 +351,41 @@ function ToolView({ item }: { item: Extract<TranscriptItem, { type: "tool" }> })
 
 function ToolLive({ tool }: { tool: { toolCallId: string; name: string; summary: string; output: string; status: string; error: string | null } }) {
   const [open, setOpen] = useState(false);
+  const done = tool.status === "finished";
+  const failed = done && Boolean(tool.error);
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px]" style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-card)" }}>
-      <span style={{ color: tool.status === "finished" ? (tool.error ? "var(--status-error)" : "var(--status-success)") : "var(--status-success)" }}>
-        {tool.status === "finished" ? (tool.error ? <XCircle size={14} /> : <CheckCircle2 size={14} />) : <Loader2 size={14} className="spin" />}
-      </span>
-      <span className="mono font-semibold">{tool.name}</span>
-      <span className="flex-1 truncate text-[var(--text-muted)]">{tool.summary}</span>
-      {tool.output && (
-        <button type="button" className="text-xs" style={{ color: "var(--status-success)" }} onClick={() => setOpen(!open)}>
-          {open ? "收起" : "展开"}
-        </button>
-      )}
+    <div className={cn("tool-card", failed && "is-failed")}>
+      <div className="tool-card-header" onClick={() => tool.output && setOpen(!open)}>
+        <span className="tool-card-status" style={{ color: failed ? "var(--status-error)" : "var(--status-success)" }}>
+          {failed ? <XCircle size={14} /> : done ? <CheckCircle2 size={14} /> : <Loader2 size={14} className="spin" />}
+        </span>
+        <span className="tool-card-name">{tool.name}</span>
+        {tool.summary && <span className="tool-card-summary">{tool.summary}</span>}
+        {tool.output && (
+          <ChevronDown size={13} className={cn("tool-card-chevron", open && "is-open")} />
+        )}
+      </div>
       {open && tool.output && (
-        <pre className="mono mt-1 w-full overflow-auto whitespace-pre-wrap break-words rounded p-2 text-xs" style={{ background: "var(--surface-messages)", border: "1px solid var(--border-subtle)", maxHeight: 240 }}>
-          {tool.output}
-        </pre>
+        <div className="tool-card-output">
+          <pre>{tool.output}</pre>
+        </div>
       )}
-      {tool.error && <div className="w-full text-xs" style={{ color: "var(--status-error)" }}>{tool.error}</div>}
+      {tool.error && <div className="tool-card-error">{tool.error}</div>}
     </div>
   );
 }
 
 function NoticeView({ level, text }: { level: string; text: string }) {
   return (
-    <div
-      className="rounded px-2.5 py-1 text-[13px]"
-      style={{
-        color: level === "error" ? "var(--status-error)" : level === "warning" ? "var(--status-warning)" : "var(--text-muted)",
-        background: level === "error" ? "rgba(255,110,110,0.08)" : level === "warning" ? "rgba(255,175,85,0.08)" : "transparent",
-      }}
-    >
-      {text}
-    </div>
-  );
-}
-
-function Composer() {
-  const conn = useStore((s) => s.conn);
-  const phase = useStore((s) => s.snapshot?.phase ?? "idle");
-  const draft = useStore((s) => s.draft);
-  const setDraft = useStore((s) => s.setDraft);
-  const busy = useStore((s) => s.busy);
-  const sendPrompt = useStore((s) => s.sendPrompt);
-  const sendSteer = useStore((s) => s.sendSteer);
-  const sendAbort = useStore((s) => s.sendAbort);
-
-  const connected = conn === "connected";
-  const running = RUNNING_PHASES.includes(phase);
-
-  const submit = () => {
-    const text = draft.trim();
-    if (!text || busy || !connected) return;
-    setDraft("");
-    void (running ? sendSteer(text) : sendPrompt(text));
-  };
-
-  return (
-    <div className="flex shrink-0 flex-col gap-1.5 px-4 pb-2 pt-2.5" style={{ background: "var(--surface-composer)", borderTop: "1px solid var(--border-subtle)" }}>
-      <div
-        className="flex items-end gap-2 rounded-lg px-3.5 py-2 transition-colors"
-        style={{ background: "var(--surface-messages)", border: "1px solid var(--border-strong)" }}
-        onFocus={(e) => (e.currentTarget.style.borderColor = "var(--status-success)")}
-        onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border-strong)")}
-      >
-        <textarea
-          className="flex-1 resize-none border-none bg-transparent text-[14px] outline-none placeholder:text-[var(--text-faint)]"
-          style={{ lineHeight: 1.45, minHeight: 22, maxHeight: 160 }}
-          rows={1}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          placeholder={!connected ? "请先连接工作区" : running ? "运行中：输入消息注入 steer…" : "输入消息开始对话…"}
-          spellCheck={false}
-        />
-        <div className="flex shrink-0 gap-1">
-          {running && (
-            <button
-              type="button"
-              className="flex h-8 w-8 items-center justify-center rounded transition-colors hover:bg-[var(--surface-hover)]"
-              style={{ color: "var(--status-error)" }}
-              title="中止"
-              onClick={() => void sendAbort()}
-            >
-              <Square size={15} />
-            </button>
-          )}
-          <button
-            type="button"
-            className="flex h-8 w-8 items-center justify-center rounded text-black transition-colors disabled:opacity-40"
-            style={{ background: "var(--primary)" }}
-            disabled={!connected || !draft.trim() || busy}
-            onClick={submit}
-          >
-            <Send size={15} />
-          </button>
-        </div>
-      </div>
-      <div className="text-center text-[11px] text-[var(--text-faint)]">
-        {running ? "运行中 — Enter 发送 steer" : "Enter 发送 · Shift+Enter 换行"}
-      </div>
+    <div className={cn("notice-row", level)}>
+      {level === "error" ? (
+        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+      ) : level === "warning" ? (
+        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+      ) : (
+        <Info size={13} className="mt-0.5 shrink-0" />
+      )}
+      <span>{text}</span>
     </div>
   );
 }

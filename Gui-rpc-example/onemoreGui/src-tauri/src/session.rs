@@ -97,3 +97,95 @@ pub fn list_all_sessions() -> Result<Vec<SessionEntry>, GuiError> {
     entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(entries)
 }
+
+/// 定位 session 所在的 DB 文件(sessions 目录下任一 .db)。
+fn find_session_db(session_id: &str) -> Result<std::path::PathBuf, GuiError> {
+    let dir = sessions_dir()?;
+    if !dir.exists() {
+        return Err(GuiError::new("session_not_found", "会话不存在"));
+    }
+    for entry in fs::read_dir(&dir).map_err(|e| GuiError::new("list_sessions", e.to_string()))? {
+        let entry = entry.map_err(|e| GuiError::new("list_sessions", e.to_string()))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("db") {
+            continue;
+        }
+        let conn = match Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let found: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)", [session_id], |r| {
+                r.get(0)
+            })
+            .unwrap_or(false);
+        if found {
+            return Ok(path);
+        }
+    }
+    Err(GuiError::new("session_not_found", "会话不存在"))
+}
+
+/// 重命名会话。
+pub fn rename_session(session_id: &str, title: &str) -> Result<(), GuiError> {
+    let path = find_session_db(session_id)?;
+    let conn = Connection::open(&path).map_err(|e| GuiError::new("rename_session", e.to_string()))?;
+    conn.execute(
+        "UPDATE session SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![title, now_secs(), session_id],
+    )
+    .map_err(|e| GuiError::new("rename_session", e.to_string()))?;
+    Ok(())
+}
+
+/// 删除会话:删除 session 行及其 leaf 链上的全部 entries。
+pub fn delete_session(session_id: &str) -> Result<(), GuiError> {
+    let path = find_session_db(session_id)?;
+    let mut conn = Connection::open(&path).map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+
+    // 沿 parent_id 从 leaf 回溯收集全部 entry id。
+    let leaf_id: Option<String> = tx
+        .query_row("SELECT leaf_id FROM session WHERE id = ?1", [session_id], |r| r.get(0))
+        .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+
+    let mut chain: Vec<String> = Vec::new();
+    let mut current: Option<String> = leaf_id;
+    let mut guard = 0usize;
+    while let Some(id) = current {
+        if guard > 100_000 {
+            break;
+        }
+        guard += 1;
+        chain.push(id.clone());
+        current = tx
+            .query_row(
+                "SELECT parent_id FROM entries WHERE id = ?1",
+                [&id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+    }
+
+    for id in &chain {
+        tx.execute("DELETE FROM entries WHERE id = ?1", [id])
+            .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+    }
+    tx.execute("DELETE FROM session WHERE id = ?1", [session_id])
+        .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+    tx.commit()
+        .map_err(|e| GuiError::new("delete_session", e.to_string()))?;
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

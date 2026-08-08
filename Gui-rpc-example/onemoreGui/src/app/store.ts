@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { playErrorSound, playSuccessSound } from "@/lib/sounds";
 import {
   rpcDiagnosticsTail,
   rpcRequest,
@@ -23,22 +24,28 @@ import {
 } from "../rpc/reducer";
 import type { ApprovalDecision } from "../rpc/protocol";
 import type {
+  ConfigDto,
   GitStatus,
   SessionEntry,
   SessionViewState,
   WorkspaceEntry,
+  WorkspaceGroup,
   WorkspaceList,
 } from "./types";
 
 interface AppStore extends SessionViewState {
   // workspace 管理
   workspaces: WorkspaceEntry[];
+  workspaceGroups: WorkspaceGroup[];
   activeWorkspace: string | null;
   // session 列表（跨 workspace 扫描）
   sessions: SessionEntry[];
+  // session UI 状态
+  pinnedSessions: Record<string, number>;
   // config
   configText: string;
   configDirty: boolean;
+  configDto: ConfigDto | null;
   // git
   gitStatus: GitStatus | null;
   // UI
@@ -58,15 +65,26 @@ interface AppStore extends SessionViewState {
   addWorkspace(path: string): Promise<void>;
   removeWorkspace(path: string): Promise<void>;
   selectWorkspace(path: string): Promise<void>;
+  renameWorkspace(path: string, label: string): Promise<void>;
+  createGroup(name: string): Promise<void>;
+  renameGroup(id: string, name: string): Promise<void>;
+  deleteGroup(id: string): Promise<void>;
+  assignGroup(path: string, groupId: string): Promise<void>;
 
   // session
   loadSessions(): Promise<void>;
   loadSession(id: string): Promise<void>;
   clearConversation(): Promise<void>;
+  renameSession(id: string, title: string): Promise<void>;
+  deleteSession(id: string): Promise<void>;
+  togglePinSession(id: string): void;
+  isSessionPinned(id: string): boolean;
 
   // config
   loadConfig(): Promise<void>;
   saveConfig(text: string): Promise<void>;
+  loadConfigDto(): Promise<void>;
+  saveConfigDto(dto: ConfigDto): Promise<void>;
 
   // git
   loadGitStatus(workspace: string): Promise<void>;
@@ -81,6 +99,27 @@ interface AppStore extends SessionViewState {
   respondApproval(decision: ApprovalDecision): Promise<void>;
   snapshotNow(): Promise<void>;
   refreshDiagnostics(): Promise<void>;
+}
+
+const PINNED_KEY = "onemore-gui:pinned-sessions";
+
+function readPinnedSessions(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(PINNED_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writePinnedSessions(pinned: Record<string, number>) {
+  try {
+    localStorage.setItem(PINNED_KEY, JSON.stringify(pinned));
+  } catch {
+    // ignore
+  }
 }
 
 export const useStore = create<AppStore>((set, get) => {
@@ -118,10 +157,13 @@ export const useStore = create<AppStore>((set, get) => {
   return {
     ...freshViewState(),
     workspaces: [],
+    workspaceGroups: [],
     activeWorkspace: null,
     sessions: [],
+    pinnedSessions: readPinnedSessions(),
     configText: "",
     configDirty: false,
+    configDto: null,
     gitStatus: null,
     initialized: false,
     settingsOpen: false,
@@ -144,6 +186,10 @@ export const useStore = create<AppStore>((set, get) => {
             set(applyEvent(s, ev.event));
             if (ev.event.type === "settled") {
               void rpcRequest("get_snapshot").catch(() => {});
+            }
+            if (ev.event.type === "command_finished") {
+              if (ev.event.status === "succeeded") playSuccessSound();
+              else if (ev.event.status === "failed") playErrorSound();
             }
             break;
           case "stderr":
@@ -174,7 +220,7 @@ export const useStore = create<AppStore>((set, get) => {
     loadWorkspaces: async () => {
       try {
         const list = await invoke<WorkspaceList>("list_workspaces");
-        set({ workspaces: list.workspaces });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
       } catch {
         // ignore
       }
@@ -183,7 +229,7 @@ export const useStore = create<AppStore>((set, get) => {
     addWorkspace: async (path) => {
       try {
         const list = await invoke<WorkspaceList>("add_workspace", { path });
-        set({ workspaces: list.workspaces });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
       } catch (e) {
         set({ lastError: toErrorMessage(e) });
       }
@@ -192,7 +238,53 @@ export const useStore = create<AppStore>((set, get) => {
     removeWorkspace: async (path) => {
       try {
         const list = await invoke<WorkspaceList>("remove_workspace", { path });
-        set({ workspaces: list.workspaces });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
+        if (get().activeWorkspace === path) set({ activeWorkspace: null });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    renameWorkspace: async (path, label) => {
+      try {
+        const list = await invoke<WorkspaceList>("rename_workspace", { path, label });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    createGroup: async (name) => {
+      try {
+        const list = await invoke<WorkspaceList>("create_group", { name });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    renameGroup: async (id, name) => {
+      try {
+        const list = await invoke<WorkspaceList>("rename_group", { id, name });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    deleteGroup: async (id) => {
+      try {
+        const list = await invoke<WorkspaceList>("delete_group", { id });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    assignGroup: async (path, groupId) => {
+      try {
+        const list = await invoke<WorkspaceList>("assign_group", { path, groupId });
+        set({ workspaces: list.workspaces, workspaceGroups: list.groups ?? [] });
       } catch (e) {
         set({ lastError: toErrorMessage(e) });
       }
@@ -224,6 +316,37 @@ export const useStore = create<AppStore>((set, get) => {
 
     clearConversation: () => sendCommand("clear_conversation", null),
 
+    renameSession: async (id, title) => {
+      try {
+        await invoke("rename_session", { sessionId: id, title });
+        await get().loadSessions();
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    deleteSession: async (id) => {
+      try {
+        await invoke("delete_session", { sessionId: id });
+        await get().loadSessions();
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    togglePinSession: (id) => {
+      const pinned = { ...get().pinnedSessions };
+      if (pinned[id]) {
+        delete pinned[id];
+      } else {
+        pinned[id] = Date.now();
+      }
+      writePinnedSessions(pinned);
+      set({ pinnedSessions: pinned });
+    },
+
+    isSessionPinned: (id) => Boolean(get().pinnedSessions[id]),
+
     loadConfig: async () => {
       try {
         const text = await invoke<string>("read_config");
@@ -237,6 +360,24 @@ export const useStore = create<AppStore>((set, get) => {
       try {
         await invoke("write_config", { content: text });
         set({ configText: text, configDirty: false });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    loadConfigDto: async () => {
+      try {
+        const dto = await invoke<ConfigDto>("get_config_dto");
+        set({ configDto: dto });
+      } catch (e) {
+        set({ lastError: toErrorMessage(e) });
+      }
+    },
+
+    saveConfigDto: async (dto) => {
+      try {
+        await invoke("update_config_dto", { dto });
+        set({ configDto: dto });
       } catch (e) {
         set({ lastError: toErrorMessage(e) });
       }

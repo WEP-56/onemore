@@ -1,83 +1,71 @@
-import { useEffect, useState } from "react";
-import { useStore } from "@/app/store";
-import { X, Save } from "lucide-react";
+// 设置中心:左侧导航 + 右侧分区。
+// 大类:基础设置(外观)/ 配置(可视化 config.toml)/ 项目(工作区)/ 会话 / 关于。
 
-export default function SettingsModal() {
-  const open = useStore((s) => s.settingsOpen);
-  const setOpen = useStore((s) => s.setSettingsOpen);
-  const loadConfig = useStore((s) => s.loadConfig);
-  const saveConfig = useStore((s) => s.saveConfig);
-  const configText = useStore((s) => s.configText);
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
+import { useState } from "react";
+import { X, Palette, Wrench, Folder, MessageSquare, Info } from "lucide-react";
+import { cn } from "@/lib/utils";
+import AppearanceSection from "@/components/settings/AppearanceSection";
+import ConfigSection from "@/components/settings/ConfigSection";
+import ProjectsSection from "@/components/settings/ProjectsSection";
+import SessionsSection from "@/components/settings/SessionsSection";
+import AboutSection from "@/components/settings/AboutSection";
 
-  useEffect(() => {
-    if (open) {
-      void loadConfig();
-      setDraft(configText);
-    }
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+type SettingsTab = "appearance" | "config" | "projects" | "sessions" | "about";
 
-  useEffect(() => {
-    if (open) setDraft(configText);
-  }, [configText, open]);
+const NAV_ITEMS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
+  { id: "appearance", label: "基础设置", icon: <Palette /> },
+  { id: "config", label: "配置", icon: <Wrench /> },
+  { id: "projects", label: "项目", icon: <Folder /> },
+  { id: "sessions", label: "会话", icon: <MessageSquare /> },
+  { id: "about", label: "关于", icon: <Info /> },
+];
+
+interface SettingsModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export default function SettingsModal({ open, onOpenChange }: SettingsModalProps) {
+  const [tab, setTab] = useState<SettingsTab>("appearance");
 
   if (!open) return null;
 
-  const handleSave = async () => {
-    setSaving(true);
-    await saveConfig(draft);
-    setSaving(false);
-    setOpen(false);
-  };
-
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.5)" }}
-      onClick={() => setOpen(false)}
-    >
-      <div
-        className="flex h-[70vh] max-h-[600px] w-[640px] max-w-[calc(100vw-48px)] flex-col gap-3 rounded-lg p-6"
-        style={{ background: "var(--surface-card)", border: "1px solid var(--border-strong)", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="m-0 text-base font-semibold">设置 — config.toml</h2>
-          <button type="button" className="flex h-7 w-7 items-center justify-center rounded transition-colors hover:bg-[var(--surface-hover)]" onClick={() => setOpen(false)}>
-            <X size={16} className="text-[var(--text-muted)]" />
-          </button>
-        </div>
-        <p className="m-0 text-[13px] text-[var(--text-faint)]">
-          编辑 Onemore 配置文件。保存后新会话生效，运行中的会话不受影响。
-        </p>
-        <textarea
-          className="mono flex-1 resize-none rounded-md p-3 text-[13px] outline-none"
-          style={{ background: "var(--surface-messages)", border: "1px solid var(--border-strong)", lineHeight: 1.5 }}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onFocus={(e) => (e.currentTarget.style.borderColor = "var(--status-success)")}
-          onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border-strong)")}
-          spellCheck={false}
-        />
-        <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            className="rounded-md px-3.5 py-1.5 text-[13px] transition-colors hover:bg-[var(--surface-hover)]"
-            style={{ border: "1px solid var(--border-strong)", background: "var(--surface-control)", color: "var(--text-primary)" }}
-            onClick={() => setOpen(false)}
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            className="flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px] font-semibold text-black disabled:opacity-40"
-            style={{ background: "var(--primary)" }}
-            disabled={saving}
-            onClick={() => void handleSave()}
-          >
-            <Save size={14} /> 保存
-          </button>
+    <div className="settings-shell" onClick={() => onOpenChange(false)}>
+      <div className="settings-window" onClick={(e) => e.stopPropagation()}>
+        <nav className="settings-nav">
+          <div className="settings-nav-title">OnemoreGui</div>
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={cn("settings-nav-item", tab === item.id && "is-active")}
+              onClick={() => setTab(item.id)}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="settings-content">
+          <div className="settings-content-header">
+            <h2>{NAV_ITEMS.find((i) => i.id === tab)?.label}</h2>
+            <button
+              type="button"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-strong)]"
+              title="关闭设置"
+              onClick={() => onOpenChange(false)}
+            >
+              <X size={15} />
+            </button>
+          </div>
+          <div className="settings-body">
+            {tab === "appearance" && <AppearanceSection />}
+            {tab === "config" && <ConfigSection />}
+            {tab === "projects" && <ProjectsSection />}
+            {tab === "sessions" && <SessionsSection />}
+            {tab === "about" && <AboutSection />}
+          </div>
         </div>
       </div>
     </div>

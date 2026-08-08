@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod config_edit;
 mod error;
 mod local;
 mod rpc;
@@ -118,6 +119,20 @@ async fn write_config(content: String) -> Result<(), GuiError> {
         .map_err(|e| GuiError::new("join_error", e.to_string()))?
 }
 
+#[tauri::command]
+async fn get_config_dto() -> Result<config_edit::ConfigDto, GuiError> {
+    tauri::async_runtime::spawn_blocking(config_edit::get_config_dto)
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn update_config_dto(dto: config_edit::ConfigDto) -> Result<(), GuiError> {
+    tauri::async_runtime::spawn_blocking(move || config_edit::update_config_dto(&dto))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
 // ── Workspace commands ──
 
 #[tauri::command]
@@ -141,11 +156,60 @@ async fn remove_workspace(path: String) -> Result<workspace::WorkspaceList, GuiE
         .map_err(|e| GuiError::new("join_error", e.to_string()))?
 }
 
+#[tauri::command]
+async fn rename_workspace(path: String, label: String) -> Result<workspace::WorkspaceList, GuiError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::rename_workspace(&path, &label))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn create_group(name: String) -> Result<workspace::WorkspaceList, GuiError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::create_group(&name))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn rename_group(id: String, name: String) -> Result<workspace::WorkspaceList, GuiError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::rename_group(&id, &name))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn delete_group(id: String) -> Result<workspace::WorkspaceList, GuiError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::delete_group(&id))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn assign_group(path: String, group_id: String) -> Result<workspace::WorkspaceList, GuiError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::assign_group(&path, &group_id))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
 // ── Session commands ──
 
 #[tauri::command]
 async fn list_all_sessions() -> Result<Vec<session::SessionEntry>, GuiError> {
     tauri::async_runtime::spawn_blocking(|| session::list_all_sessions())
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn rename_session(session_id: String, title: String) -> Result<(), GuiError> {
+    tauri::async_runtime::spawn_blocking(move || session::rename_session(&session_id, &title))
+        .await
+        .map_err(|e| GuiError::new("join_error", e.to_string()))?
+}
+
+#[tauri::command]
+async fn delete_session(session_id: String) -> Result<(), GuiError> {
+    tauri::async_runtime::spawn_blocking(move || session::delete_session(&session_id))
         .await
         .map_err(|e| GuiError::new("join_error", e.to_string()))?
 }
@@ -182,10 +246,19 @@ fn main() {
             rpc_snapshot,
             read_config,
             write_config,
+            get_config_dto,
+            update_config_dto,
             list_workspaces,
             add_workspace,
             remove_workspace,
+            rename_workspace,
+            create_group,
+            rename_group,
+            delete_group,
+            assign_group,
             list_all_sessions,
+            rename_session,
+            delete_session,
             get_git_status,
             get_file_tree
         ])

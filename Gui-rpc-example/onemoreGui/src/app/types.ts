@@ -106,10 +106,17 @@ export interface WorkspaceEntry {
   path: string;
   label: string;
   last_used: number;
+  group_id?: string | null;
+}
+
+export interface WorkspaceGroup {
+  id: string;
+  name: string;
 }
 
 export interface WorkspaceList {
   workspaces: WorkspaceEntry[];
+  groups?: WorkspaceGroup[];
 }
 
 export interface SessionEntry {
@@ -142,4 +149,63 @@ export interface FileTreeNode {
   path: string;
   is_dir: boolean;
   children: FileTreeNode[];
+}
+
+// ── config.toml DTO(与 src-tauri/src/config_edit.rs 对齐)──
+
+export interface AgentDto {
+  provider: string;
+  shell: string;
+  max_turns: number | null;
+  tool_timeout_secs: number | null;
+  system_prompt: string | null;
+}
+
+export interface RetryDto {
+  max_attempts: number | null;
+  base_delay_ms: number | null;
+  max_delay_ms: number | null;
+  max_retry_after_ms: number | null;
+}
+
+export interface CompactionDto {
+  enabled: boolean | null;
+  reserve_tokens: number | null;
+  keep_recent_tokens: number | null;
+}
+
+export interface PermissionsDto {
+  workspace_read: string | null;
+  workspace_write: string | null;
+  outside_workspace: string | null;
+  commands: string | null;
+}
+
+export interface ModelDto {
+  name: string;
+  context_window: number | null;
+  max_tokens: number | null;
+  efforts: string[];
+  default_effort: string | null;
+}
+
+export interface ProviderDto {
+  name: string;
+  api: string;
+  profile: string | null;
+  base_url: string;
+  api_key_env: string | null;
+  api_key: string | null;
+  default_model: string | null;
+  max_tokens: number | null;
+  context_window: number | null;
+  models: ModelDto[];
+}
+
+export interface ConfigDto {
+  agent: AgentDto;
+  retry: RetryDto;
+  compaction: CompactionDto;
+  permissions: PermissionsDto;
+  providers: ProviderDto[];
 }
