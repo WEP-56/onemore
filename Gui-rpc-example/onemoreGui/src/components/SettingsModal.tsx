@@ -2,7 +2,7 @@
 // 大类:基础设置(外观)/ 配置(可视化 config.toml)/ 项目(工作区)/ 会话 / 关于。
 
 import { useState } from "react";
-import { X, Palette, Wrench, Folder, MessageSquare, Info } from "lucide-react";
+import { ArrowLeft, Palette, Wrench, Folder, MessageSquare, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import AppearanceSection from "@/components/settings/AppearanceSection";
 import ConfigSection from "@/components/settings/ConfigSection";
@@ -20,6 +20,14 @@ const NAV_ITEMS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
   { id: "about", label: "关于", icon: <Info /> },
 ];
 
+const TAB_DESCRIPTIONS: Record<SettingsTab, string> = {
+  appearance: "外观、字体和显示密度。",
+  config: "配置 OneMore agent、模型与执行权限。",
+  projects: "管理本机保存的项目和工作区分组。",
+  sessions: "按项目查看、重命名和清理历史会话。",
+  about: "版本与应用信息。",
+};
+
 interface SettingsModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -31,10 +39,14 @@ export default function SettingsModal({ open, onOpenChange }: SettingsModalProps
   if (!open) return null;
 
   return (
-    <div className="settings-shell" onClick={() => onOpenChange(false)}>
-      <div className="settings-window" onClick={(e) => e.stopPropagation()}>
+    <div className="settings-shell">
+      <div className="settings-window">
         <nav className="settings-nav">
-          <div className="settings-nav-title">OnemoreGui</div>
+          <button type="button" className="settings-back-button" onClick={() => onOpenChange(false)}>
+            <ArrowLeft size={15} />
+            <span>返回应用</span>
+          </button>
+          <div className="settings-nav-title">设置</div>
           {NAV_ITEMS.map((item) => (
             <button
               key={item.id}
@@ -49,15 +61,10 @@ export default function SettingsModal({ open, onOpenChange }: SettingsModalProps
         </nav>
         <div className="settings-content">
           <div className="settings-content-header">
-            <h2>{NAV_ITEMS.find((i) => i.id === tab)?.label}</h2>
-            <button
-              type="button"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-strong)]"
-              title="关闭设置"
-              onClick={() => onOpenChange(false)}
-            >
-              <X size={15} />
-            </button>
+            <div>
+              <h2>{NAV_ITEMS.find((i) => i.id === tab)?.label}</h2>
+              <p>{TAB_DESCRIPTIONS[tab]}</p>
+            </div>
           </div>
           <div className="settings-body">
             {tab === "appearance" && <AppearanceSection />}

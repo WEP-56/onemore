@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/app/store";
 import { MessageSquare, Pencil, Trash2 } from "lucide-react";
-import { normalizeWorkspace, relativeTime } from "@/app/util";
+import { normalizeWorkspace, relativeTime, workspaceKey } from "@/app/util";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -26,16 +26,17 @@ export default function SessionsSection() {
     const map = new Map<string, typeof sessions>();
     for (const s of sessions) {
       if (q && !s.title.toLowerCase().includes(q) && !normalizeWorkspace(s.workspace).toLowerCase().includes(q)) continue;
-      const list = map.get(s.workspace) ?? [];
+      const key = workspaceKey(s.workspace);
+      const list = map.get(key) ?? [];
       list.push(s);
-      map.set(s.workspace, list);
+      map.set(key, list);
     }
     for (const list of map.values()) list.sort((a, b) => b.updated_at - a.updated_at);
     return map;
   }, [sessions, query]);
 
-  const workspaceLabel = (path: string) =>
-    workspaces.find((w) => w.path === path)?.label ?? path.split(/[\\/]/).pop() ?? path;
+  const workspaceLabel = (key: string, fallbackPath: string) =>
+    workspaces.find((w) => workspaceKey(w.path) === key)?.label ?? normalizeWorkspace(fallbackPath).split(/[\\/]/).pop() ?? fallbackPath;
 
   const total = sessions.length;
 
@@ -59,11 +60,11 @@ export default function SessionsSection() {
           <div className="settings-empty">{query ? "无匹配会话" : "暂无会话"}</div>
         )}
 
-        {[...byWorkspace.entries()].map(([ws, list]) => (
-          <div key={ws} className="settings-workspace-group">
+        {[...byWorkspace.entries()].map(([key, list]) => (
+          <div key={key} className="settings-workspace-group">
             <div className="settings-workspace-group-header">
               <MessageSquare size={12} />
-              {workspaceLabel(ws)}
+              {workspaceLabel(key, list[0]?.workspace ?? key)}
               <span className="text-[10px] opacity-70">{list.length}</span>
             </div>
             <div className="settings-card" style={{ padding: 6 }}>

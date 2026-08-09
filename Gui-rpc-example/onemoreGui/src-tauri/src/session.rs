@@ -46,7 +46,7 @@ pub fn list_all_sessions() -> Result<Vec<SessionEntry>, GuiError> {
         let path = db_file.path();
         let conn = match Connection::open_with_flags(
             &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             Ok(c) => c,
             Err(_) => continue,
@@ -112,7 +112,7 @@ fn find_session_db(session_id: &str) -> Result<std::path::PathBuf, GuiError> {
         }
         let conn = match Connection::open_with_flags(
             &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
             Ok(c) => c,
             Err(_) => continue,

@@ -37,15 +37,70 @@ fn store_path() -> Result<PathBuf, GuiError> {
 
 pub fn load_workspaces() -> Result<WorkspaceList, GuiError> {
     let path = store_path()?;
-    if !path.exists() {
-        return Ok(WorkspaceList::default());
+    let mut list = if path.exists() {
+        let text = fs::read_to_string(&path)
+            .map_err(|e| GuiError::new("load_workspaces", e.to_string()))?;
+        if text.trim().is_empty() {
+            WorkspaceList::default()
+        } else {
+            serde_json::from_str(&text)
+                .map_err(|e| GuiError::new("load_workspaces", e.to_string()))?
+        }
+    } else {
+        WorkspaceList::default()
+    };
+
+    merge_session_workspaces(&mut list)?;
+    list.workspaces.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    Ok(list)
+}
+
+/// 会话数据库是历史工作区的事实来源。workspaces/*.json 只以哈希命名，
+/// 文件内容不包含原始路径，因此无法单独反查；这里将 sessions 中的路径
+/// 合并进 GUI 列表，同时保留用户设置的名称和分组。
+fn merge_session_workspaces(list: &mut WorkspaceList) -> Result<(), GuiError> {
+    for session in crate::session::list_all_sessions()? {
+        if session.workspace.trim().is_empty() {
+            continue;
+        }
+        let path = display_workspace_path(&session.workspace);
+        let key = workspace_identity(&path);
+        if let Some(existing) = list
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace_identity(&workspace.path) == key)
+        {
+            existing.last_used = existing.last_used.max(session.updated_at);
+            continue;
+        }
+        let label = std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        list.workspaces.push(WorkspaceEntry {
+            path,
+            label,
+            last_used: session.updated_at,
+            group_id: None,
+        });
     }
-    let text =
-        fs::read_to_string(&path).map_err(|e| GuiError::new("load_workspaces", e.to_string()))?;
-    if text.trim().is_empty() {
-        return Ok(WorkspaceList::default());
+    Ok(())
+}
+
+fn display_workspace_path(path: &str) -> String {
+    let stripped = path.strip_prefix(r"\\?\").unwrap_or(path);
+    dunce::canonicalize(stripped)
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|_| stripped.to_string())
+}
+
+fn workspace_identity(path: &str) -> String {
+    let normalized = display_workspace_path(path).replace('/', "\\");
+    if cfg!(windows) {
+        normalized.trim_end_matches('\\').to_lowercase()
+    } else {
+        normalized.trim_end_matches('\\').to_string()
     }
-    serde_json::from_str(&text).map_err(|e| GuiError::new("load_workspaces", e.to_string()))
 }
 
 pub fn save_workspaces(list: &WorkspaceList) -> Result<(), GuiError> {

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "@/app/App";
 import { initAppearance } from "@/lib/appearance";
 import "@/styles/app.css";
+import "@/styles/cc-shell.css";
 
 initAppearance();
 

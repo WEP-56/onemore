@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "@/app/store";
-import { normalizeWorkspace, relativeTime } from "@/app/util";
+import { normalizeWorkspace, relativeTime, workspaceKey } from "@/app/util";
 import {
   Plus,
   Search,
@@ -18,6 +18,9 @@ import {
   Check,
   GitBranch,
   MoreHorizontal,
+  Home,
+  Settings,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -37,6 +40,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import BrandMark from "@/components/BrandMark";
 
 export default function Sidebar() {
   const workspaces = useStore((s) => s.workspaces);
@@ -50,7 +54,9 @@ export default function Sidebar() {
   const connect = useStore((s) => s.connect);
   const loadSessions = useStore((s) => s.loadSessions);
   const loadSession = useStore((s) => s.loadSession);
-  const clearConversation = useStore((s) => s.clearConversation);
+  const newConversation = useStore((s) => s.newConversation);
+  const snapshot = useStore((s) => s.snapshot);
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const conn = useStore((s) => s.conn);
 
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -86,9 +92,10 @@ export default function Sidebar() {
       if (q) {
         if (!s.title.toLowerCase().includes(q) && !norm.toLowerCase().includes(q)) continue;
       }
-      const list = byWs.get(s.workspace) ?? [];
+      const key = workspaceKey(s.workspace);
+      const list = byWs.get(key) ?? [];
       list.push(s);
-      byWs.set(s.workspace, list);
+      byWs.set(key, list);
     }
     for (const list of byWs.values()) list.sort((a, b) => b.updated_at - a.updated_at);
     return { sessionsByWorkspace: byWs, searchActive: Boolean(q) };
@@ -105,7 +112,6 @@ export default function Sidebar() {
   }, [workspaces, workspaceGroups]);
 
   const handleSelectSession = (id: string) => {
-    if (conn !== "connected") return;
     void loadSession(id);
   };
 
@@ -113,6 +119,21 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
+      <div className="sidebar-brand" data-tauri-drag-region>
+        <BrandMark />
+        <span>OneMore</span>
+      </div>
+      <nav className="sidebar-primary-nav" aria-label="主导航">
+        <button type="button" className="sidebar-primary-item is-active">
+          <Home size={15} />
+          <span>首页</span>
+        </button>
+        <button type="button" className="sidebar-primary-item" disabled={conn !== "connected"} onClick={() => void newConversation()}>
+          <Plus size={15} />
+          <span>新建会话</span>
+          <kbd>Ctrl N</kbd>
+        </button>
+      </nav>
       <div className="sidebar-search-box">
         <Search size={13} className="shrink-0" />
         <input
@@ -169,7 +190,7 @@ export default function Sidebar() {
                       label={w.label}
                       active={activeWorkspace === w.path}
                       expanded={isExpanded(w.path)}
-                      hasSessions={(sessionsByWorkspace.get(w.path)?.length ?? 0) > 0}
+                      hasSessions={(sessionsByWorkspace.get(workspaceKey(w.path))?.length ?? 0) > 0}
                       onSelect={() => void handleSelectWorkspace(w.path)}
                       onToggle={() => handleExpand(w.path)}
                       onRename={() => setRenameTarget({ type: "workspace", id: w.path, title: w.label })}
@@ -177,8 +198,8 @@ export default function Sidebar() {
                       groupOptions={workspaceGroups}
                       currentGroupId={w.group_id ?? null}
                       onAssignGroup={(gid) => void useStore.getState().assignGroup(w.path, gid)}
-                      sessions={sessionsByWorkspace.get(w.path) ?? []}
-                      activeSessionId={null}
+                      sessions={sessionsByWorkspace.get(workspaceKey(w.path)) ?? []}
+                      activeSessionId={snapshot?.session_id ?? null}
                       onSelectSession={handleSelectSession}
                       onRenameSession={(id, title) => setRenameTarget({ type: "session", id, title })}
                       searchActive={searchActive}
@@ -200,7 +221,7 @@ export default function Sidebar() {
                       label={w.label}
                       active={activeWorkspace === w.path}
                       expanded={isExpanded(w.path)}
-                      hasSessions={(sessionsByWorkspace.get(w.path)?.length ?? 0) > 0}
+                      hasSessions={(sessionsByWorkspace.get(workspaceKey(w.path))?.length ?? 0) > 0}
                       onSelect={() => void handleSelectWorkspace(w.path)}
                       onToggle={() => handleExpand(w.path)}
                       onRename={() => setRenameTarget({ type: "workspace", id: w.path, title: w.label })}
@@ -208,8 +229,8 @@ export default function Sidebar() {
                       groupOptions={workspaceGroups}
                       currentGroupId={w.group_id ?? null}
                       onAssignGroup={(gid) => void useStore.getState().assignGroup(w.path, gid)}
-                      sessions={sessionsByWorkspace.get(w.path) ?? []}
-                      activeSessionId={null}
+                      sessions={sessionsByWorkspace.get(workspaceKey(w.path)) ?? []}
+                      activeSessionId={snapshot?.session_id ?? null}
                       onSelectSession={handleSelectSession}
                       onRenameSession={(id, title) => setRenameTarget({ type: "session", id, title })}
                       searchActive={searchActive}
@@ -226,14 +247,31 @@ export default function Sidebar() {
       </div>
 
       <div className="sidebar-footer">
-        <button
-          type="button"
-          className="sidebar-new-thread-btn"
-          disabled={conn !== "connected"}
-          onClick={() => void clearConversation()}
-        >
-          <Plus size={15} /> 新建会话
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="sidebar-settings-button" title="快捷菜单">
+              <Settings size={15} />
+              <span>菜单</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" sideOffset={7} className="sidebar-corner-menu w-52">
+            <DropdownMenuLabel>OneMore</DropdownMenuLabel>
+            <DropdownMenuItem disabled={conn !== "connected"} onSelect={() => void newConversation()}>
+              <Plus size={14} /> 新建会话
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void handleAddWorkspace()}>
+              <FolderPlus size={14} /> 添加项目
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={conn !== "connected"} onSelect={() => void loadSessions()}>
+              <RefreshCw size={14} /> 刷新会话
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+              <Settings size={14} /> 设置
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <span className="sidebar-version">v0.1.0</span>
       </div>
 
       <RenameDialog target={renameTarget} onClose={() => setRenameTarget(null)} />

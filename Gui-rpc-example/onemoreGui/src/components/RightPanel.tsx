@@ -28,26 +28,28 @@ const TABS: { id: PanelTabId; label: string; icon: React.ReactNode }[] = [
 
 export default function RightPanel() {
   const [tab, setTab] = useState<PanelTabId>("files");
-  const conn = useStore((s) => s.conn);
-
-  if (conn === "disconnected") return <div className="w-0 overflow-hidden" />;
 
   return (
     <>
-      <div className="right-panel-toolbar" role="tablist" aria-label="面板">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.id}
-            className={cn("panel-tab", tab === t.id && "is-active")}
-            title={t.label}
-            onClick={() => setTab(t.id)}
-          >
-            {t.icon}
-          </button>
-        ))}
+      <div className="right-panel-toolbar" role="tablist" aria-label="面板" data-tauri-drag-region>
+        <div className="right-panel-tabs">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.id}
+              className={cn("panel-tab", tab === t.id && "is-active")}
+              title={t.label}
+              onClick={() => setTab(t.id)}
+            >
+              {t.icon}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="right-panel-section-header">
+        <strong>{tab === "files" ? "Workspace" : tab === "git" ? "Source Control" : "Plan"}</strong>
       </div>
       <div className="right-panel-body">
         {tab === "files" && <FileTree />}

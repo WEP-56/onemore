@@ -32,6 +32,7 @@ import type {
   WorkspaceGroup,
   WorkspaceList,
 } from "./types";
+import { normalizeWorkspace, workspaceKey } from "./util";
 
 interface AppStore extends SessionViewState {
   // workspace 管理
@@ -74,6 +75,7 @@ interface AppStore extends SessionViewState {
   // session
   loadSessions(): Promise<void>;
   loadSession(id: string): Promise<void>;
+  newConversation(): Promise<void>;
   clearConversation(): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
@@ -102,6 +104,25 @@ interface AppStore extends SessionViewState {
 }
 
 const PINNED_KEY = "onemore-gui:pinned-sessions";
+const LAST_WORKSPACE_KEY = "onemore-gui:last-workspace";
+const LAST_SESSION_KEY = "onemore-gui:last-session";
+
+function readStoredValue(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(key: string, value: string | null) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
 
 function readPinnedSessions(): Record<string, number> {
   try {
@@ -123,6 +144,7 @@ function writePinnedSessions(pinned: Record<string, number>) {
 }
 
 export const useStore = create<AppStore>((set, get) => {
+  let restoreSessionId: string | null = null;
   async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
     set({ busy: true });
     try {
@@ -179,13 +201,27 @@ export const useStore = create<AppStore>((set, get) => {
         switch (ev.kind) {
           case "hello":
             set(applyHello(s, ev.server, ev.snapshot));
+            writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.snapshot.workspace));
+            writeStoredValue(LAST_SESSION_KEY, ev.snapshot.session_id);
             void get().loadSessions();
             void get().loadGitStatus(ev.snapshot.workspace);
+            if (restoreSessionId && restoreSessionId !== ev.snapshot.session_id) {
+              const requested = restoreSessionId;
+              restoreSessionId = null;
+              void sendCommand("load_session", { session_id: requested });
+            } else {
+              restoreSessionId = null;
+            }
             break;
           case "event":
             set(applyEvent(s, ev.event));
             if (ev.event.type === "settled") {
               void rpcRequest("get_snapshot").catch(() => {});
+              void get().loadSessions();
+            }
+            if (ev.event.type === "session_snapshot") {
+              writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.event.snapshot.workspace));
+              writeStoredValue(LAST_SESSION_KEY, ev.event.snapshot.session_id);
             }
             if (ev.event.type === "command_finished") {
               if (ev.event.status === "succeeded") playSuccessSound();
@@ -211,6 +247,16 @@ export const useStore = create<AppStore>((set, get) => {
       }
       await get().loadWorkspaces();
       await get().loadSessions();
+
+      const lastSessionId = readStoredValue(LAST_SESSION_KEY);
+      const lastWorkspace = readStoredValue(LAST_WORKSPACE_KEY);
+      const session = lastSessionId ? get().sessions.find((item) => item.id === lastSessionId) : null;
+      const targetKey = workspaceKey(session?.workspace ?? lastWorkspace ?? "");
+      const workspace = get().workspaces.find((item) => workspaceKey(item.path) === targetKey);
+      if (workspace) {
+        restoreSessionId = session?.id ?? null;
+        await get().connect(workspace.path);
+      }
     },
 
     setDraft: (draft) => set({ draft }),
@@ -292,6 +338,7 @@ export const useStore = create<AppStore>((set, get) => {
 
     selectWorkspace: async (path) => {
       set({ activeWorkspace: path });
+      writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(path));
       await get().loadGitStatus(path);
     },
 
@@ -305,13 +352,28 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     loadSession: async (id) => {
-      const active = get().activeWorkspace;
-      if (!active) return;
-      // 确保已连接到对应 workspace
-      if (get().conn !== "connected") {
-        await get().connect(active);
+      const session = get().sessions.find((item) => item.id === id);
+      if (!session) return;
+      const targetKey = workspaceKey(session.workspace);
+      const registered = get().workspaces.find((item) => workspaceKey(item.path) === targetKey);
+      const target = registered?.path ?? normalizeWorkspace(session.workspace);
+      writeStoredValue(LAST_WORKSPACE_KEY, target);
+      writeStoredValue(LAST_SESSION_KEY, id);
+
+      if (get().conn !== "connected" || workspaceKey(get().activeWorkspace ?? "") !== targetKey) {
+        restoreSessionId = id;
+        await get().connect(target);
+        return;
       }
       await sendCommand("load_session", { session_id: id });
+    },
+
+    newConversation: async () => {
+      const active = get().activeWorkspace;
+      if (!active) return;
+      await get().loadSessions();
+      writeStoredValue(LAST_SESSION_KEY, null);
+      await get().connect(active);
     },
 
     clearConversation: () => sendCommand("clear_conversation", null),
@@ -393,7 +455,8 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     connect: async (workspace) => {
-      const normalized = workspace.replace(/^\\\\\?\\/, "");
+      const normalized = normalizeWorkspace(workspace);
+      writeStoredValue(LAST_WORKSPACE_KEY, normalized);
       set({ activeWorkspace: workspace, ...freshViewState(), conn: "spawning" });
       try {
         await rpcStart({

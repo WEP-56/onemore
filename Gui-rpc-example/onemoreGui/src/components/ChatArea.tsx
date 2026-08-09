@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "@/app/store";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { AssistantBlock, TranscriptItem } from "@/rpc/protocol";
 import type { LiveStream } from "@/app/types";
 import {
@@ -20,14 +21,53 @@ import {
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
 import Composer from "@/components/Composer";
+import BrandMark from "@/components/BrandMark";
 
 export default function ChatArea() {
   const conn = useStore((s) => s.conn);
+  const snapshot = useStore((s) => s.snapshot);
+  const liveStreams = useStore((s) => s.liveStreams);
+  const liveTools = useStore((s) => s.liveTools);
+  const liveUsers = useStore((s) => s.liveUsers);
+  const liveNotices = useStore((s) => s.liveNotices);
   if (conn === "disconnected") return <WelcomeScreen />;
+
+  const hasConversation = Boolean(
+    snapshot?.transcript.length ||
+      Object.keys(liveStreams).length ||
+      Object.keys(liveTools).length ||
+      Object.keys(liveUsers).length ||
+      liveNotices.length,
+  );
+
+  if (!hasConversation) return <NewConversationScreen />;
+
   return (
-    <main className="flex min-w-0 flex-1 flex-col" style={{ background: "var(--surface-messages)" }}>
+    <main className="chat-workspace">
       <Transcript />
-      <Composer />
+      <Composer variant="docked" />
+    </main>
+  );
+}
+
+function NewConversationScreen() {
+  const workspaces = useStore((s) => s.workspaces);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
+  const label = workspaces.find((workspace) => workspace.path === activeWorkspace)?.label ?? "当前工作区";
+
+  return (
+    <main className="new-conversation">
+      <div className="new-conversation-center">
+        <div className="new-conversation-title">
+          <BrandMark />
+          <h1>创造任何东西</h1>
+        </div>
+        <Composer variant="home" />
+        <div className="new-conversation-workspace">
+          <FolderOpen size={13} />
+          <span>{label}</span>
+        </div>
+      </div>
     </main>
   );
 }
@@ -36,6 +76,7 @@ function WelcomeScreen() {
   const workspaces = useStore((s) => s.workspaces);
   const connect = useStore((s) => s.connect);
   const loadSessions = useStore((s) => s.loadSessions);
+  const addWorkspace = useStore((s) => s.addWorkspace);
   const lastError = useStore((s) => s.lastError);
 
   const handleConnect = async (path: string) => {
@@ -43,68 +84,54 @@ function WelcomeScreen() {
     await loadSessions();
   };
 
+  const handleAddWorkspace = async () => {
+    const dir = await open({ directory: true, title: "选择项目目录" });
+    if (typeof dir !== "string") return;
+    await addWorkspace(dir);
+    await handleConnect(dir);
+  };
+
   return (
-    <main
-      className="flex min-w-0 flex-1 flex-col items-center justify-center"
-      style={{ background: "var(--surface-messages)" }}
-    >
-      <div className="flex max-w-md flex-col items-center gap-3 px-10 py-8">
-        <span
-          className="inline-block h-7 w-7 rounded-full"
-          style={{ background: "var(--status-success)", boxShadow: "0 0 20px var(--status-success)" }}
-        />
-        <h1 className="m-0 text-3xl font-semibold tracking-tight">OnemoreGui</h1>
-        <p className="mb-4 text-sm text-[var(--text-faint)]">可靠的 Coding Agent — 选择工作区开始对话</p>
+    <main className="welcome-screen">
+      <div className="welcome-content">
+        <BrandMark className="brand-mark--hero" />
+        <h1>OneMore</h1>
+        <p>选择一个项目，让 agent 开始工作。</p>
 
         {lastError && (
-          <div
-            className="flex flex-col gap-1 rounded-md px-3 py-2.5 text-[13px]"
-            style={{
-              border: "1px solid var(--status-error)",
-              background: "rgba(255,110,110,0.08)",
-              color: "var(--status-error)",
-            }}
-          >
+          <div className="welcome-error">
             <span className="mono">{lastError.code}</span>
             <span>{lastError.message}</span>
           </div>
         )}
 
-        <div className="flex w-full flex-col gap-2">
+        <div className="welcome-projects">
           {workspaces.length === 0 ? (
-            <div
-              className="border border-dashed px-5 py-5 text-center text-[13px] text-[var(--text-faint)]"
-              style={{ borderColor: "var(--border-strong)", borderRadius: "var(--radius)" }}
-            >
-              还没有工作区。在左栏点击 + 添加一个项目目录。
-            </div>
+            <button type="button" className="welcome-primary-action" onClick={() => void handleAddWorkspace()}>
+              <FolderOpen size={16} />
+              打开项目文件夹
+            </button>
           ) : (
-            workspaces.map((w) => (
+            workspaces.slice(0, 5).map((w) => (
               <button
                 key={w.path}
                 type="button"
-                className="flex items-center gap-3 rounded-lg px-4 py-3 text-left transition-colors"
-                style={{
-                  border: "1px solid var(--border-subtle)",
-                  background: "var(--surface-card)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "var(--status-success)";
-                  e.currentTarget.style.background = "var(--surface-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "var(--border-subtle)";
-                  e.currentTarget.style.background = "var(--surface-card)";
-                }}
+                className="welcome-project-row"
                 onClick={() => void handleConnect(w.path)}
               >
-                <FolderOpen size={18} style={{ color: "var(--status-success)" }} />
-                <div className="flex min-w-0 flex-col gap-0.5">
-                  <span className="text-sm font-semibold">{w.label}</span>
-                  <span className="mono truncate text-[11px] text-[var(--text-faint)]">{w.path}</span>
+                <FolderOpen size={16} />
+                <div>
+                  <strong>{w.label}</strong>
+                  <span>{w.path}</span>
                 </div>
+                <ChevronRight size={14} />
               </button>
             ))
+          )}
+          {workspaces.length > 0 && (
+            <button type="button" className="welcome-secondary-action" onClick={() => void handleAddWorkspace()}>
+              <FolderOpen size={14} /> 打开其他项目
+            </button>
           )}
         </div>
       </div>
@@ -171,11 +198,6 @@ function Transcript() {
     <div className="messages-shell">
       <div className="messages-scroll" ref={shellRef} onScroll={handleScroll}>
         <div className="messages-inner">
-          {nodes.length === 0 && (
-            <div className="m-auto max-w-md px-5 py-16 text-center text-[var(--text-faint)]">
-              输入消息开始对话。Onemore 会根据工作区内容自动理解上下文。
-            </div>
-          )}
           {nodes.map((n) => (
             <div key={n.key}>{n.node}</div>
           ))}

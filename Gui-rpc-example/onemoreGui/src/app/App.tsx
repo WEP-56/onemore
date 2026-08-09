@@ -7,11 +7,13 @@ import SettingsModal from "@/components/SettingsModal";
 import ApprovalDialog from "@/components/ApprovalDialog";
 import ErrorToasts from "@/components/ErrorToasts";
 import MainTopbar from "@/components/MainTopbar";
+import WindowControls from "@/components/WindowControls";
 import { useResizablePanels } from "@/hooks/useResizablePanels";
 import { useSidebarToggles } from "@/hooks/useSidebarToggles";
 
 export default function App() {
   const init = useStore((s) => s.init);
+  const conn = useStore((s) => s.conn);
   const settingsOpen = useStore((s) => s.settingsOpen);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const { sidebarWidth, rightPanelWidth, onSidebarResizeStart, onRightPanelResizeStart } =
@@ -22,9 +24,11 @@ export default function App() {
     void init();
   }, [init]);
 
+  const rightPanelVisible = conn === "connected" && !settingsOpen;
+
   return (
     <div
-      className={`app layout-desktop${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+      className={`app layout-desktop${sidebarCollapsed ? " sidebar-collapsed" : ""}${rightPanelVisible ? " has-right-panel" : ""}${settingsOpen ? " settings-open" : ""}`}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
@@ -43,26 +47,30 @@ export default function App() {
         <MainTopbar
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={toggleSidebar}
-          onOpenSettings={() => setSettingsOpen(true)}
         />
         <div className="content">
           <div className="content-layer content-layer--chat">
             <ChatArea />
           </div>
         </div>
-        <div
-          className="right-panel-resizer"
-          role="separator"
-          aria-orientation="vertical"
-          onMouseDown={onRightPanelResizeStart}
-        />
-        <div className="right-panel">
-          <RightPanel />
-        </div>
+        {rightPanelVisible && (
+          <>
+            <div
+              className="right-panel-resizer"
+              role="separator"
+              aria-orientation="vertical"
+              onMouseDown={onRightPanelResizeStart}
+            />
+            <div className="right-panel">
+              <RightPanel />
+            </div>
+          </>
+        )}
       </section>
       <ApprovalDialog />
       <ErrorToasts />
       <SettingsModal open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <WindowControls />
     </div>
   );
 }

@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 
+use crate::config::{onemore_data_dir, ONEMORE_HOME_ENV};
 use crate::error::GuiError;
 
 use super::events::{RpcEvent, EVENT_NAME};
@@ -115,6 +116,7 @@ fn build_command(executable: &str, config: Option<&str>) -> Result<Command, GuiE
     if let Some(cfg) = config {
         cmd.arg("--config").arg(cfg);
     }
+    cmd.env(ONEMORE_HOME_ENV, onemore_data_dir()?);
     Ok(cmd)
 }
 
@@ -136,6 +138,7 @@ fn spawn_with_fallback(options: &StartOptions) -> Result<Child, GuiError> {
                 if let Some(cfg) = options.config.as_deref() {
                     c.arg("--config").arg(cfg);
                 }
+                c.env(ONEMORE_HOME_ENV, onemore_data_dir()?);
                 c.current_dir(&options.workspace)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())

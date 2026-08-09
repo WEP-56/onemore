@@ -4,10 +4,11 @@
 import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "@/app/store";
-import { File as FileIcon, Send, Square } from "lucide-react";
+import { ArrowUp, File as FileIcon, Plus, Square } from "lucide-react";
 import type { FileTreeNode } from "@/app/types";
 import { formatTokens } from "@/app/util";
 import { cn } from "@/lib/utils";
+import { ModelSelectMenu } from "@/components/ModelSelectMenu";
 
 const RUNNING_PHASES = ["running", "retrying", "compacting", "waiting_approval"];
 const HISTORY_KEY = "onemore-gui:composer-history";
@@ -34,7 +35,7 @@ interface MentionState {
   startIndex: number; // '@' 的位置
 }
 
-export default function Composer() {
+export default function Composer({ variant = "docked" }: { variant?: "home" | "docked" }) {
   const conn = useStore((s) => s.conn);
   const phase = useStore((s) => s.snapshot?.phase ?? "idle");
   const draft = useStore((s) => s.draft);
@@ -190,120 +191,105 @@ export default function Composer() {
     return out;
   }, [draft]);
 
+  const openFileMention = () => {
+    const prefix = draft && !/\s$/.test(draft) ? `${draft} ` : draft;
+    const next = `${prefix}@`;
+    setDraft(next);
+    if (activeWorkspace) void loadMentionFiles(activeWorkspace);
+    setMention({ query: "", startIndex: next.length - 1 });
+    setMentionCursor(0);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
   return (
-    <div className="flex shrink-0 flex-col gap-1.5 px-4 pb-2 pt-2.5" style={{ background: "var(--surface-composer)", borderTop: "1px solid var(--border-subtle)" }}>
+    <div className={cn("composer-shell", variant === "home" ? "composer-shell--home" : "composer-shell--docked")}>
       {refs.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-1">
+        <div className="composer-references">
           {refs.map((r) => (
-            <span
-              key={r}
-              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]"
-              style={{ border: "1px solid var(--border-strong)", background: "var(--surface-item)", color: "var(--text-muted)" }}
-            >
-              <FileIcon size={11} className="text-[var(--status-success)]" />
+            <span key={r} className="composer-reference">
+              <FileIcon size={11} />
               {r.split(/[\\/]/).pop()}
             </span>
           ))}
         </div>
       )}
-      <div
-        className="relative flex items-end gap-2 rounded-lg px-3.5 py-2 transition-colors"
-        style={{ background: "var(--surface-messages)", border: "1px solid var(--border-strong)" }}
-        onFocus={(e) => (e.currentTarget.style.borderColor = "var(--status-success)")}
-        onBlur={(e) => {
-          e.currentTarget.style.borderColor = "var(--border-strong)";
-          // 点击浮层内不关闭
-        }}
-      >
+      <div className="composer-box">
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none border-none bg-transparent text-[14px] outline-none placeholder:text-[var(--text-faint)]"
-          style={{ lineHeight: 1.45, minHeight: 22, maxHeight: 160 }}
+          className="composer-textarea"
           rows={1}
           value={draft}
-          onChange={(e) => handleChange(e.target.value)}
+          onChange={(e) => {
+            handleChange(e.target.value);
+            e.currentTarget.style.height = "auto";
+            e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, variant === "home" ? 150 : 180)}px`;
+          }}
           onKeyDown={handleKeyDown}
           onBlur={() => {
             // 延迟关闭,允许点击浮层
             window.setTimeout(() => setMention((m) => (m ? null : m)), 120);
           }}
-          placeholder={!connected ? "请先连接工作区" : running ? "运行中：输入消息注入 steer…" : "输入消息开始对话…(@ 引用文件)"}
+          placeholder={!connected ? "请先连接工作区" : running ? "运行中：输入消息以调整当前任务…" : "输入消息，@ 引用文件"}
           spellCheck={false}
         />
-        <div className="flex shrink-0 gap-1">
-          {running && (
-            <button
-              type="button"
-              className="flex h-8 w-8 items-center justify-center rounded transition-colors hover:bg-[var(--surface-hover)]"
-              style={{ color: "var(--status-error)" }}
-              title="中止"
-              onClick={() => void sendAbort()}
-            >
-              <Square size={15} />
+        <div className="composer-controls">
+          <div className="composer-controls-left">
+            <button type="button" className="composer-icon-button" title="引用文件" onClick={openFileMention}>
+              <Plus size={17} />
             </button>
-          )}
+            <ModelSelectMenu />
+            {queuedCount > 0 && <span className="composer-queue">已排队 {queuedCount}</span>}
+          </div>
+          <div className="composer-controls-right">
+            {usage && (usage.input_tokens > 0 || usage.output_tokens > 0) && (
+              <span className="composer-usage">{formatTokens(usage.input_tokens + usage.output_tokens)} tokens</span>
+            )}
+            {running && (
+              <button type="button" className="composer-stop-button" title="中止" onClick={() => void sendAbort()}>
+                <Square size={13} fill="currentColor" />
+              </button>
+            )}
           <button
             type="button"
-            className="flex h-8 w-8 items-center justify-center rounded text-black transition-colors disabled:opacity-40"
-            style={{ background: "var(--primary)" }}
+            className="composer-submit-button"
+            title={running ? "发送调整" : "发送"}
             disabled={!connected || !draft.trim() || busy}
             onClick={() => submit()}
           >
-            <Send size={15} />
+            <ArrowUp size={16} strokeWidth={2.4} />
           </button>
+          </div>
         </div>
 
-        {/* @ 引用浮层 */}
         {mention && (
-          <div
-            className="absolute bottom-[calc(100%+6px)] left-2 z-20 w-80 overflow-hidden rounded-lg"
-            style={{ background: "var(--surface-popover)", border: "1px solid var(--border-strong)", boxShadow: "0 12px 32px rgba(0,0,0,0.35)" }}
-            onMouseDown={(e) => e.preventDefault()}
-          >
-            <div className="border-b px-3 py-1.5 text-[11px] text-[var(--text-faint)]" style={{ borderColor: "var(--border-subtle)" }}>
+          <div className="composer-mention-menu" onMouseDown={(e) => e.preventDefault()}>
+            <div className="composer-mention-title">
               {mentionLoading ? "加载文件…" : `引用文件 — ${filteredMentions.length} 个匹配`}
             </div>
-            <div className="max-h-64 overflow-y-auto py-1">
+            <div className="composer-mention-list">
               {filteredMentions.length === 0 && (
-                <div className="px-3 py-2 text-[12px] text-[var(--text-faint)]">无匹配文件</div>
+                <div className="composer-mention-empty">无匹配文件</div>
               )}
               {filteredMentions.map((f, i) => (
                 <button
                   key={f.path}
                   type="button"
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px]",
-                    i === mentionCursor ? "bg-[var(--surface-hover)] text-[var(--text-strong)]" : "text-[var(--text-muted)]",
-                  )}
+                  className={cn("composer-mention-row", i === mentionCursor && "is-active")}
                   onMouseEnter={() => setMentionCursor(i)}
                   onClick={() => applyMention(f.path)}
                 >
-                  <FileIcon size={12} className="shrink-0 text-[var(--text-faint)]" />
-                  <span className="truncate">{f.name}</span>
+                  <FileIcon size={12} />
+                  <span>{f.name}</span>
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2 border-t px-3 py-1 text-[10px] text-[var(--text-faint)]" style={{ borderColor: "var(--border-subtle)" }}>
-              <span>↑↓ 选择</span>
-              <span>Enter 引用</span>
-              <span>Esc 关闭</span>
+            <div className="composer-mention-hint">
+              <span>↑↓ 选择</span><span>Enter 引用</span><span>Esc 关闭</span>
             </div>
           </div>
         )}
       </div>
-      <div className="flex items-center justify-center gap-3 text-[11px] text-[var(--text-faint)]">
-        {queuedCount > 0 && (
-          <span style={{ color: "var(--status-warning)" }}>
-            排队 {queuedCount} 条{running ? " · Enter 发送 steer" : ""}
-          </span>
-        )}
-        {usage && (usage.input_tokens > 0 || usage.output_tokens > 0) && (
-          <span className="mono">
-            ↑ {formatTokens(usage.input_tokens)} ↓ {formatTokens(usage.output_tokens)}
-          </span>
-        )}
-        <span>{running ? "运行中 — Enter 发送 steer" : "Enter 发送 · Shift+Enter 换行 · ↑ 历史 · @ 引用文件"}</span>
-      </div>
+      {variant === "docked" && <div className="composer-hint">Enter 发送 · Shift+Enter 换行</div>}
     </div>
   );
 }

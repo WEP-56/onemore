@@ -45,8 +45,13 @@ export function phaseLabel(phase: string): string {
 
 /// 规范化 workspace 路径：去掉 UNC 前缀 \\?\，统一为正常路径。
 export function normalizeWorkspace(path: string): string {
-  if (path.startsWith("\\\\?\\")) return path.slice(4);
-  return path;
+  return path.startsWith("\\\\?\\") ? path.slice(4) : path;
+}
+
+/** 用于关联 SQLite 会话与 GUI 工作区的稳定键。 */
+export function workspaceKey(path: string): string {
+  const normalized = normalizeWorkspace(path).replace(/\//g, "\\").replace(/\\+$/, "");
+  return /^[a-z]:\\/i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
 }
 
 /// 格式化时间戳（秒）为简短的相对时间。

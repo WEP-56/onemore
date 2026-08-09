@@ -197,8 +197,6 @@ export interface ProviderDto {
   api_key_env: string | null;
   api_key: string | null;
   default_model: string | null;
-  max_tokens: number | null;
-  context_window: number | null;
   models: ModelDto[];
 }
 

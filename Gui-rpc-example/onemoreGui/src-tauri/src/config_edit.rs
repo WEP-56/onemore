@@ -85,10 +85,6 @@ pub struct ProviderDto {
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
-    pub max_tokens: Option<u64>,
-    #[serde(default)]
-    pub context_window: Option<u64>,
-    #[serde(default)]
     pub models: Vec<ModelDto>,
 }
 
@@ -173,6 +169,24 @@ fn parse_doc(doc: &DocumentMut) -> ConfigDto {
                         }
                     }
                 }
+                let legacy_model = pt.get("model").and_then(Item::as_str).map(String::from);
+                if models.is_empty() {
+                    if let Some(model) = legacy_model.as_ref() {
+                        models.push(ModelDto {
+                            name: model.clone(),
+                            context_window: pt
+                                .get("context_window")
+                                .and_then(Item::as_integer)
+                                .map(|v| v as u64),
+                            max_tokens: pt
+                                .get("max_tokens")
+                                .and_then(Item::as_integer)
+                                .map(|v| v as u64),
+                            efforts: Vec::new(),
+                            default_effort: None,
+                        });
+                    }
+                }
                 providers.push(ProviderDto {
                     name: name.to_string(),
                     api: pt.get("api").and_then(Item::as_str).unwrap_or_default().to_string(),
@@ -180,9 +194,11 @@ fn parse_doc(doc: &DocumentMut) -> ConfigDto {
                     base_url: pt.get("base_url").and_then(Item::as_str).unwrap_or_default().to_string(),
                     api_key_env: pt.get("api_key_env").and_then(Item::as_str).map(String::from),
                     api_key: pt.get("api_key").and_then(Item::as_str).map(String::from),
-                    default_model: pt.get("default_model").and_then(Item::as_str).map(String::from),
-                    max_tokens: pt.get("max_tokens").and_then(Item::as_integer).map(|v| v as u64),
-                    context_window: pt.get("context_window").and_then(Item::as_integer).map(|v| v as u64),
+                    default_model: pt
+                        .get("default_model")
+                        .and_then(Item::as_str)
+                        .map(String::from)
+                        .or(legacy_model),
                     models,
                 });
             }
@@ -281,8 +297,8 @@ pub fn update_config_dto(dto: &ConfigDto) -> Result<(), GuiError> {
                 set_opt_str_in_table(ptable, "api_key_env", p.api_key_env.as_deref());
                 set_opt_str_in_table(ptable, "api_key", p.api_key.as_deref());
                 set_opt_str_in_table(ptable, "default_model", p.default_model.as_deref());
-                set_opt_int_in_table(ptable, "max_tokens", p.max_tokens.map(|v| v as i64));
-                set_opt_int_in_table(ptable, "context_window", p.context_window.map(|v| v as i64));
+                // 可视化编辑器统一写新格式。旧格式字段与 default_model/models 不能共存。
+                remove_legacy_provider_model_fields(ptable);
 
                 // models 子表
                 let mut wanted_models: BTreeMap<String, &ModelDto> = BTreeMap::new();
@@ -405,5 +421,60 @@ fn set_opt_bool_in_table(t: &mut Table, key: &str, value: Option<bool>) {
         None => {
             t.remove(key);
         }
+    }
+}
+
+fn remove_legacy_provider_model_fields(table: &mut Table) {
+    table.remove("model");
+    table.remove("max_tokens");
+    table.remove("context_window");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_provider_is_exposed_as_a_model_entry() {
+        let doc = r#"
+[agent]
+provider = "legacy"
+
+[providers.legacy]
+api = "responses"
+base_url = "https://example.com/v1"
+model = "legacy-model"
+context_window = 32000
+max_tokens = 4096
+"#
+        .parse::<DocumentMut>()
+        .unwrap();
+
+        let dto = parse_doc(&doc);
+        let provider = &dto.providers[0];
+        assert_eq!(provider.default_model.as_deref(), Some("legacy-model"));
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].name, "legacy-model");
+        assert_eq!(provider.models[0].context_window, Some(32000));
+        assert_eq!(provider.models[0].max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn new_format_removes_all_legacy_provider_model_fields() {
+        let mut doc = r#"
+model = "legacy-model"
+context_window = 32000
+max_tokens = 4096
+default_model = "new-model"
+"#
+        .parse::<DocumentMut>()
+        .unwrap();
+        let table = doc.as_table_mut();
+
+        remove_legacy_provider_model_fields(table);
+        assert!(!table.contains_key("model"));
+        assert!(!table.contains_key("context_window"));
+        assert!(!table.contains_key("max_tokens"));
+        assert_eq!(table.get("default_model").and_then(Item::as_str), Some("new-model"));
     }
 }
