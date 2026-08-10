@@ -1,7 +1,7 @@
 # OneMore SDK 与 JSONL RPC 设计
 
-状态：RPC/SDK v1 已实现，剩余可靠性覆盖见第 8 节
-更新时间：2026-08-07
+状态：RPC/SDK v3 已实现
+更新时间：2026-08-10
 
 本文定义 OneMore 下一阶段的本地 SDK 边界和首版 JSONL RPC 协议。目标不是复制 Pi 的
 全部 server、client 或扩展系统，而是在现有弱 harness 上建立一个长期可维护的外部入口：
@@ -484,7 +484,7 @@ query 命令在 response 的 `result` 中返回数据，不产生 `command_id`�
 
 ## 7. 使用示例
 
-以下示例使用当前 v1 接口。
+以下示例使用当前 v3 接口。
 
 ### 7.1 Rust 嵌入
 
@@ -577,77 +577,13 @@ server：
 {"type":"event","event":{"type":"progress","progress":{"type":"approval_resolved","request_id":"approval-1","allowed":true}}}
 ```
 
-## 8. 施工 TODO
+## 8. 维护规则
 
-### P0：规格冻结
-
-- [x] 区分 Pi 成熟 coding-agent、实验 protocol/server 和未完成 Harness v2。
-- [x] 定义本地 SDK、snapshot、event、RPC envelope 和首版命令清单。
-- [x] 评审本文件并冻结 v1 命名；实现开始后协议变更必须同步更新示例和测试。
-
-### P1：稳定 view types 与投影
-
-- [x] 新建职责独立的 SDK 模块，定义 `SessionSnapshot`、`SessionEvent`、view types 和错误码。
-- [x] 从 `Agent` 当前 facts、plan、usage、selection 和 queues 生成单向 snapshot projection。
-- [x] 确保 projection 不暴露 thinking raw、provider payload、工具原始参数或任意 details。
-- [x] 为 snapshot revision、phase 转换和 transcript tool 配对增加单元测试。
-- [x] 不直接给 `AgentCommand`、`AgentEvent` 或 `SessionEntryPayload` 增加 wire serde 语义。
-
-### P2：SessionController 与 admission
-
-- [x] 用内部 command envelope 替换裸 `Sender<AgentCommand>`，加入 `command_id` 和一次性 ack。
-- [x] 实现 `prompt/steer/follow_up/abort/compact/set_model` 的明确 admission 规则。
-- [x] query 必须由 Runtime 线程返回当前值，移除 `RuntimeHandle` 中会变旧的启动元数据副本。
-- [x] 记录已接纳队列项的 command ID；取消时不得静默丢弃。
-- [x] 实现 phase 状态机、`command_finished` 和严格一次的 `settled`。
-- [x] 实现不消费 event stream 的 `wait_until_settled`。
-- [x] 保持 approval 独立响应路径，过期/重复响应返回结构化错误。
-
-### P3：现有前端迁移
-
-- [x] TUI 改用 `SessionController + SessionEvents`。
-- [x] `--once` 改用相同 admission 与 settled 语义。
-- [x] 删除旧裸 sender/receiver 的公开入口，不留兼容的第二套 runtime。
-- [x] 验证 CLI 的 clear、session load、model selection、steering 和 approval 行为不退化。
-
-### P4：JSONL RPC v3
-
-- [x] 增加独立 wire DTO；所有 object 使用严格未知字段拒绝。
-- [x] 实现 LF-only、增量 UTF-8 JSONL reader，不使用宽松的按 Unicode 行分隔逻辑。
-- [x] 实现最大帧限制、hello/version、request/response/event envelope。
-- [x] 实现 v3 命令 adapter，所有 mutation 只调用 SessionController。
-- [x] 增加 CLI `--rpc` 模式；stdout 只输出协议，stderr 输出诊断。
-- [x] malformed JSON、未知 command、重复 ID 和版本不匹配均返回稳定错误。
-
-### P5：可靠性与审批
-
-- [ ] Runtime 到 writer 使用有界队列并覆盖慢 reader 背压测试。
-- [x] broken pipe、stdin EOF 和 client 退出触发 abort、审批 deny 与安全 shutdown。
-- [ ] 审批 request/response 覆盖 allow once、allow session、deny、过期、重复和断连。
-- [x] snapshot 与 progress 交错时，最终 snapshot 可完整纠正客户端组装状态。
-- [x] accepted 输入必须逐个获得 succeeded/failed/cancelled 终态。
-- [x] 保持并回归 ToolUse/ToolResult 配对、原子工具批提交和 append-only 事实日志。
-
-### P6：测试与文档
-
-- [x] 增加 SDK 单元测试和 runtime 并发/队列测试。
-- [ ] 增加真实子进程 JSONL wire tests，覆盖 prompt、steer、abort、compact、model 和 session。
-- [ ] 增加慢 reader、断连、半帧 EOF、超长帧、未知字段和 stdout 污染测试。
-- [x] 增加最小 Rust SDK example 和非 Rust JSONL client example。
-- [x] 更新 README、runtime architecture 和 handoff；公开协议版本与兼容策略。
-- [x] 运行完整 `cargo test --locked`。
-- [x] 运行 `cargo clippy --locked --all-targets -- -D warnings`。
-- [x] 运行 `cargo fmt --all --check`。
-- [x] 运行 `$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps`。
-- [x] 运行 `git diff --check`。
-
-### 后续阶段，不属于 RPC v3
-
-- [ ] 基于现有 `parent_id + leaf_id` 增加原子 tree navigation 和 branch projection。
-- [ ] 需要时增加 branch summary，但继续使用 append-only fact 与安全投影。
-- [ ] 增加 overflow compaction 后最多一次恢复重试，禁止无限 compact/retry 循环。
-- [ ] SDK 稳定后再评估静态插件入口；首批仅限 tools、context、hooks、model registry。
-- [ ] 只有出现真实多进程 session server 需求后，才设计 exclusive acquire/lease。
+- v3 内只接受保持现有字段语义的实现修复；线协议不直接暴露内部 runtime 类型。
+- 新命令或必填字段必须提升协议版本，并同步更新 SDK view、wire tests、README 和集成示例。
+- transport 断连继续 fail closed；accepted 命令必须逐个得到终态，最终 snapshot 必须能够纠正
+  客户端对流式事件的临时组装。
+- 分支、插件、多进程 session server 等能力只有出现明确产品需求后才单独设计，不能扩张 v3。
 
 ## 9. 完成定义
 

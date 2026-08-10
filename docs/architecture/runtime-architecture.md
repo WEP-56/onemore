@@ -22,7 +22,7 @@ src/harness/
 src/sdk.rs + src/sdk/
   公开 SessionController、SessionEvents、snapshot/event view 和错误码
 src/rpc.rs + src/rpc/
-  严格 JSONL v1 framing、wire DTO 和 SessionController adapter
+  严格 JSONL v3 framing、wire DTO 和 SessionController adapter
 src/runtime.rs
   公开 Agent，并承载唯一 stateful 线程宿主
 src/runtime/
@@ -86,8 +86,8 @@ instructions、skills、environment，把每个 workspace 不同的环境信息�
 稳定 system prefix。Provider 再根据规范化后的 system、tools 与模型选择生成稳定
 `prompt_cache_key`。
 
-宿主若替换 context 或 tools，应在一个 Agent 生命周期内保持其稳定；需要接受新目录时应
-创建新 Agent，而不是在每轮请求前重扫。
+宿主若替换 context 或 tools，应在一个 capability epoch 内保持其稳定；默认 harness 通过
+`/reload` 显式重建配置、context、skills、tools 与 Web binding，而不是在每轮请求前重扫。
 
 ## Stateful Harness
 

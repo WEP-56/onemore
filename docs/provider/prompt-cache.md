@@ -139,29 +139,14 @@ reused. They are only useful when the provider capability says they are valid.
 The cache-write cost must be amortized over later reads; do not mark a large,
 one-off tool result as a write candidate.
 
-## Delivery Plan
+## Extension Rules
 
-Current implementation status:
-
-- cache reads and writes are parsed, accumulated, persisted, and exposed to the
-  CLI/TUI for OpenAI Responses, DeepSeek Responses, and Anthropic Messages;
-- provider profiles gate private request fields; DeepSeek never receives an
-  OpenAI cache key or encrypted-reasoning request;
-- tool declarations are sorted by name, prompt fingerprints are persisted with
-  assistant facts, and OpenAI requests use a stable prompt-family cache key;
-- explicit OpenAI breakpoints and Anthropic cache writes remain disabled until
-  model-level capabilities and write-cost policy are configured.
-
-1. Parse and persist provider cache usage, with fixture tests for every
-   supported provider profile.
-2. Add deterministic prompt fingerprints and notices explaining prefix changes.
-3. Keep the existing prompt layout stable; remove accidental dynamic fields and
-   make tool declaration order explicit.
-4. Add provider capability-gated OpenAI cache keys and breakpoints where the
-   configured model supports them.
-5. Add capability-gated Anthropic cache controls.
-6. Use real usage data to decide whether explicit writes lower cost for a model
-   and workload.
+- Keep prompt layout and tool declaration order deterministic.
+- Never send cache fields without an explicit provider and model capability.
+- Enable explicit cache writes only with a configured write-cost policy backed
+  by measured usage for the target model and workload.
+- Any new cache behavior requires request fixtures and cache-usage parsing tests
+  for every affected provider profile.
 
 ## Acceptance Criteria
 

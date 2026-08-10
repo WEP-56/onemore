@@ -75,12 +75,9 @@ host configuration rather than model-controlled input. Provider citations accept
 or HTTPS URLs. Credentials and fragments are removed; titles are sanitized, collapsed to one line,
 bounded, and URLs are deduplicated before the source list is appended to assistant text.
 
-## Deferred work
+## Browser control
 
-- TODO: add stable SDK/RPC DTOs for Web search started/completed/failed events, normalized sources,
-  and external-context provenance. The current JSONL RPC intentionally receives only the existing
-  assistant text and generic runtime events.
-- TODO: expose source metadata as first-class TUI/SDK data after the event contract is defined;
-  provider-specific annotations must not leak into that public contract.
-- TODO: implement provider-hosted adapters beyond OpenAI Responses and add general `web_fetch`,
-  crawl caching, and browser control.
+Browser control is the active follow-up capability. It remains harness-owned and separate from Web
+search: browser lifecycle, page snapshots, interaction references, screenshots, cancellation, and
+permissions must reuse the existing runtime and bounded tool-output contracts. See
+[the current development goal](../planning/next-phase-goals.md) for scope and acceptance criteria.

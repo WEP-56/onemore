@@ -192,23 +192,11 @@ api = "responses"
 
 ---
 
-## 交付计划
+## 维护规则
 
-1. 删除 Chat Completions，并明确实现配置拒绝逻辑。
-2. 在新增能力字段之前，先保留并扩展 Responses 与 Messages 的 Wire Fixture。
-3. 引入带保守默认值的 Provider Capability 对象。
-4. 实现以下 Provider Profile：
-   - OpenAI
-   - Anthropic
-   - DeepSeek Responses
-   - DeepSeek Messages
-5. 标准化基于 Capability 控制的推理流（Reasoning Stream）与用量统计（Usage Details）。
-6. 在完成 Prompt Cache 测量机制后再引入缓存控制功能。
-7. 未来新增厂商时，必须同时提供：
-   - Profile 文档
-   - 请求 Fixture
-   - 正常流式 Fixture
-   - 失败/不支持功能 Fixture
+- 新增能力字段前，先保留并扩展 Responses 与 Messages 的 Wire Fixture。
+- 新增厂商时必须同时提供 Profile 文档、请求 Fixture、正常流式 Fixture和失败/不支持功能 Fixture。
+- Provider 私有 reasoning 与可选请求字段必须由显式 Capability 控制，并采用保守默认值。
 
 ---
 

@@ -1,7 +1,8 @@
 # Onemore JSONL RPC 集成教学
 
 以 `Gui-rpc-example`（Tauri 2 桌面客户端）为参考实现，教你从零接入 Onemore 的
-`--rpc` 子进程协议。协议本身的权威定义见 [`rpc-sdk-design.md`](./rpc-sdk-design.md)，
+`--rpc` 子进程协议。协议本身的权威定义见
+[`rpc-sdk-design.md`](../docs/protocol/rpc-sdk-design.md)，
 本文是**面向集成者的教学路线**：先动手感受协议，再讲客户端工程要点，最后排错。
 
 > 阅读前提：你打算写一个自己的 GUI / 脚本 / 服务来驱动 Onemore agent。你不需要懂
@@ -89,7 +90,7 @@ request ID 关联「这一个请求的应答」，command ID 关联「这一条�
 
 ---
 
-## 3. 命令集速查（v1）
+## 3. 命令集速查（v3）
 
 | 命令 | 参数 | 类型 | 说明 |
 |---|---|---|---|

@@ -130,18 +130,14 @@ Existing users should create a `responses` profile for a provider that supports
 Responses. A provider that only exposes Chat Completions is intentionally out
 of scope after this change.
 
-## Delivery Plan
+## Maintenance Rules
 
-1. Delete Chat Completions and make configuration rejection explicit.
-2. Preserve and extend Responses and Messages wire fixtures before adding new
-   capability fields.
-3. Introduce a profile capability object with conservative defaults.
-4. Implement the OpenAI, Anthropic, DeepSeek Responses, and DeepSeek Messages
-   profiles.
-5. Normalize capability-gated reasoning streams and usage details.
-6. Add cache controls only after the prompt-cache measurements exist.
-7. Add another vendor only with a documented profile, a request fixture, a
-   normal stream fixture, and a failure/unsupported-feature fixture.
+- Preserve and extend Responses and Messages wire fixtures before adding new
+  capability fields.
+- Add another vendor only with a documented profile, a request fixture, a
+  normal stream fixture, and a failure/unsupported-feature fixture.
+- Keep provider-private reasoning and optional request fields behind explicit
+  profile capabilities with conservative defaults.
 
 ## Acceptance Criteria
 

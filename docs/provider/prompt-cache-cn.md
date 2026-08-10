@@ -154,21 +154,12 @@ onemore:v1:<53 个十六进制摘要字符>
 
 缓存写入成本必须能够通过后续的缓存读取得到摊销。不要将体积很大但只会使用一次的工具结果标记为缓存写入候选项。
 
-## 交付计划
+## 扩展规则
 
-当前实现状态：
-
-- 已解析、累计并持久化 OpenAI Responses、DeepSeek Responses 与 Anthropic Messages 的缓存读写 Token，并在 CLI/TUI 中展示；
-- 已通过 Provider Profile 控制厂商私有字段，DeepSeek 不会收到 OpenAI Cache Key 或加密 Reasoning 请求；
-- 工具声明按名称稳定排序，Prompt Fingerprint 随 Assistant 事实持久化，OpenAI 请求使用稳定的 Prompt Family Cache Key；
-- 显式 OpenAI Breakpoint 与 Anthropic Cache 写入仍保持关闭，直到加入模型级能力与写入成本策略。
-
-1. 解析并持久化提供商返回的缓存用量数据，同时为每个受支持的 Provider Profile 添加 Fixture 测试。
-2. 添加确定性的 Prompt Fingerprint，并提供说明前缀发生变化原因的提示信息。
-3. 保持现有提示词布局稳定，移除意外加入的动态字段，并明确工具声明的排序规则。
-4. 在已配置模型支持的前提下，加入受 Provider Capability 控制的 OpenAI Cache Key 和缓存断点。
-5. 加入受 Capability 控制的 Anthropic Cache-Control。
-6. 根据真实 Usage 数据，判断显式缓存写入是否能够降低特定模型和工作负载的成本。
+- 提示词布局和工具声明顺序必须保持确定性。
+- Provider 与模型没有显式声明能力时，禁止发送缓存字段。
+- 只有在目标模型和工作负载已有真实 Usage 测量，并配置写入成本策略后，才启用显式缓存写入。
+- 新增缓存行为时，必须为所有受影响的 Provider Profile 补齐请求 Fixture 与用量解析测试。
 
 ## 验收标准
 
