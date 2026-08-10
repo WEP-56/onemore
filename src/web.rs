@@ -1,6 +1,7 @@
 //! Provider-neutral Web capability selection and bounded, normalized citations.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -89,7 +90,7 @@ const MAX_URL_CHARS: usize = 2_048;
 const MAX_SOURCE_TITLE_CHARS: usize = 240;
 const MAX_SOURCE_PREVIEW_CHARS: usize = 1_500;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WebSearchBackendKind {
     Tavily,
@@ -229,6 +230,35 @@ impl WebMode {
     }
 }
 
+/// A resolved external-search credential. The value is intentionally omitted
+/// from serialized capability identities and redacted from debug output.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct WebSearchCredential(String);
+
+impl WebSearchCredential {
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err("external Web search credential must not be empty".into());
+        }
+        if value.chars().count() > 512 || value.chars().any(char::is_control) {
+            return Err("external Web search credential is invalid".into());
+        }
+        Ok(Self(value.into()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for WebSearchCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WebSearchCredential([REDACTED])")
+    }
+}
+
 /// The implementation selected once for one Agent/session capability epoch.
 /// Hosted tools execute inside the provider. Harness-owned bindings are turned
 /// into exactly one local `web_search` tool when the capability epoch is built.
@@ -239,7 +269,8 @@ pub enum WebCapabilityBinding {
     HarnessFunction {
         backend: WebSearchBackendKind,
         settings: WebSearchSettings,
-        api_key_env: String,
+        #[serde(skip)]
+        credential: WebSearchCredential,
     },
     Disabled,
 }
@@ -249,7 +280,7 @@ impl WebCapabilityBinding {
         mode: WebMode,
         profile: ProviderProfile,
         settings: WebSearchSettings,
-        external_backend: Option<WebSearchBackendKind>,
+        external_backend: Option<(WebSearchBackendKind, WebSearchCredential)>,
     ) -> Self {
         match mode {
             WebMode::Disabled => Self::Disabled,
@@ -258,10 +289,10 @@ impl WebCapabilityBinding {
             }
             WebMode::Native => Self::Disabled,
             WebMode::Auto | WebMode::External => external_backend
-                .map(|backend| Self::HarnessFunction {
+                .map(|(backend, credential)| Self::HarnessFunction {
                     backend,
                     settings,
-                    api_key_env: backend.api_key_env().into(),
+                    credential,
                 })
                 .unwrap_or(Self::Disabled),
         }
@@ -391,34 +422,24 @@ pub(crate) fn build_external_backend(
 ) -> Result<Option<Arc<dyn WebSearchBackend>>, String> {
     let WebCapabilityBinding::HarnessFunction {
         backend,
-        api_key_env,
+        credential,
         ..
     } = binding
     else {
         return Ok(None);
     };
-    let api_key = std::env::var(api_key_env)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "{} external web search requires environment variable {}",
-                backend.label(),
-                api_key_env
-            )
-        })?;
-    let api_key = api_key.trim();
-    if api_key.chars().count() > 512 || api_key.chars().any(char::is_control) {
+    if credential.as_str().is_empty() {
         return Err(format!(
-            "{} contains an invalid external web search credential",
-            api_key_env
+            "{} external web search has no resolved API key",
+            backend.label()
         ));
     }
+    let api_key = credential.as_str();
     let backend: Arc<dyn WebSearchBackend> = match backend {
-        WebSearchBackendKind::Tavily => Arc::new(tavily::TavilyBackend::new(api_key.into())),
-        WebSearchBackendKind::Brave => Arc::new(brave::BraveBackend::new(api_key.into())),
-        WebSearchBackendKind::Exa => Arc::new(exa::ExaBackend::new(api_key.into())),
-        WebSearchBackendKind::Serper => Arc::new(serper::SerperBackend::new(api_key.into())),
+        WebSearchBackendKind::Tavily => Arc::new(tavily::TavilyBackend::new(api_key.to_string())),
+        WebSearchBackendKind::Brave => Arc::new(brave::BraveBackend::new(api_key.to_string())),
+        WebSearchBackendKind::Exa => Arc::new(exa::ExaBackend::new(api_key.to_string())),
+        WebSearchBackendKind::Serper => Arc::new(serper::SerperBackend::new(api_key.to_string())),
     };
     Ok(Some(backend))
 }
@@ -661,7 +682,10 @@ mod tests {
                 WebMode::Auto,
                 ProviderProfile::OpenAiResponses,
                 settings.clone(),
-                Some(WebSearchBackendKind::Tavily),
+                Some((
+                    WebSearchBackendKind::Tavily,
+                    WebSearchCredential::new("test-key").unwrap(),
+                )),
             ),
             WebCapabilityBinding::OpenAiNative(settings.clone())
         );
@@ -721,12 +745,15 @@ mod tests {
             WebMode::Auto,
             ProviderProfile::AnthropicMessages,
             WebSearchSettings::default(),
-            Some(WebSearchBackendKind::Tavily),
+            Some((
+                WebSearchBackendKind::Tavily,
+                WebSearchCredential::new("secret-value").unwrap(),
+            )),
         );
         assert_eq!(binding.label(), "Tavily external web search");
         let serialized = serde_json::to_string(&binding).unwrap();
-        assert!(serialized.contains("TAVILY_API_KEY"));
         assert!(!serialized.contains("secret-value"));
+        assert!(!format!("{binding:?}").contains("secret-value"));
         assert_eq!(binding, binding.clone());
     }
 
@@ -755,12 +782,12 @@ mod tests {
             WebSearchBackendKind::Exa,
             WebSearchBackendKind::Serper,
         ] {
-            if std::env::var(kind.api_key_env())
+            let Some(value) = std::env::var(kind.api_key_env())
                 .ok()
-                .is_none_or(|value| value.trim().is_empty())
-            {
+                .filter(|value| !value.trim().is_empty())
+            else {
                 continue;
-            }
+            };
             let settings = WebSearchSettings {
                 context_size: Some(WebSearchContextSize::Low),
                 allowed_domains: Vec::new(),
@@ -769,7 +796,7 @@ mod tests {
             let binding = WebCapabilityBinding::HarnessFunction {
                 backend: kind,
                 settings: settings.clone(),
-                api_key_env: kind.api_key_env().into(),
+                credential: WebSearchCredential::new(value).unwrap(),
             };
             let backend = build_external_backend(&binding)
                 .unwrap()

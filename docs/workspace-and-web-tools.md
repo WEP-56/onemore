@@ -45,15 +45,22 @@ timezone = "America/Los_Angeles"
 
 External backend order is deterministic. `auto` prefers OpenAI Responses native search, then picks
 the first configured backend with a non-empty credential. `external` requires one available backend;
-`native` never falls back to a harness backend. Credentials are read once while the tool is built:
+`native` never falls back to a harness backend. Each backend credential follows the same resolution
+rules as an LLM provider: configure either a direct `api_key` or an `api_key_env` in
+`[web.backends.<name>]`; if both are omitted, the standard environment variable is used. The two
+configuration fields are mutually exclusive, and the resolved credential is frozen when the tool is
+built:
 
 - `tavily`: `TAVILY_API_KEY`
 - `brave`: `BRAVE_SEARCH_API_KEY`
 - `exa`: `EXA_API_KEY`
 - `serper`: `SERPER_API_KEY`
 
-The key value is held only by the backend instance; the frozen binding, prompt identity, tool output,
-and persisted facts contain only the backend kind and environment-variable name. A runtime failure is
+For example, `[web.backends.tavily] api_key = "..."` writes the key in the config file, while
+`[web.backends.tavily] api_key_env = "MY_TAVILY_KEY"` uses a custom environment variable. The key
+value never enters the frozen binding identity, prompt identity, tool output, or persisted facts.
+
+The key value is held only by the resolved backend instance; a runtime failure is
 reported against the selected backend and never switches implementations inside the session.
 
 External searches are remote disclosures, so `web_search` uses the harness `always_ask` permission

@@ -143,8 +143,9 @@
   credentials 与 fragment，清洗/压平/截断标题，URL 去重，最多 20 个 source。
 - Agent 启动、`/reload` 和 provider/model 切换均发出当前 Web capability Notice。
 - `external_backends` 固定支持 `tavily | brave | exa | serper`，按配置顺序选择首个有凭据的 backend。
-- 密钥只从 `TAVILY_API_KEY`、`BRAVE_SEARCH_API_KEY`、`EXA_API_KEY`、`SERPER_API_KEY` 读取，
-  在 capability epoch 构建时冻结，不进入 prompt identity、工具输出或持久化事实。
+- 每个 backend 的密钥与 LLM provider 使用相同规则：在 `[web.backends.<name>]` 二选一配置
+  `api_key` 或 `api_key_env`；两者都省略时读取对应标准环境变量。解析后的密钥在 capability
+  epoch 构建时冻结，不进入 prompt identity、工具输出或持久化事实。
 - harness-owned `web_search` 复用普通工具生命周期、强制审批、取消、超时、清洗和有界输出；
   runtime error 不会触发 session 内 backend 切换。
 
@@ -175,7 +176,7 @@ RPC 延期项已记录在 `docs/workspace-and-web-tools.md`。在用户改变决
 
 2026-08-10 的最终完整回归已通过：
 
-- 255 个 unit tests。
+- 256 个 unit tests。
 - 1 个 RPC subprocess test。
 - 8 个 provider wire tests。
 - 0 failed、0 ignored。

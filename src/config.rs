@@ -19,7 +19,8 @@ use crate::compaction::{CompactionSettings, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_
 use crate::harness::ModelRegistry;
 use crate::permission::{PermissionRule, PermissionRules};
 use crate::web::{
-    WebCapabilityBinding, WebMode, WebSearchBackendKind, WebSearchLocation, WebSearchSettings,
+    WebCapabilityBinding, WebMode, WebSearchBackendKind, WebSearchCredential, WebSearchLocation,
+    WebSearchSettings,
 };
 
 /// 两类接口。字符串来自 config 的 `api = "..."`。
@@ -175,11 +176,22 @@ struct WebSection {
     #[serde(default)]
     external_backends: Vec<String>,
     #[serde(default)]
+    backends: BTreeMap<String, RawWebBackendSection>,
+    #[serde(default)]
     context_size: Option<String>,
     #[serde(default)]
     allowed_domains: Vec<String>,
     #[serde(default)]
     location: Option<WebLocationSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawWebBackendSection {
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    api_key_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -292,6 +304,12 @@ struct ProviderSection {
 }
 
 #[derive(Debug, Clone)]
+struct WebBackendAuth {
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ModelSection {
     context_window: Option<u64>,
     max_tokens: Option<u64>,
@@ -361,6 +379,7 @@ pub struct Config {
     web_mode: WebMode,
     web_search: WebSearchSettings,
     external_web_backends: Vec<WebSearchBackendKind>,
+    external_web_backend_auth: BTreeMap<WebSearchBackendKind, WebBackendAuth>,
     providers: BTreeMap<String, ProviderSection>,
 }
 
@@ -460,6 +479,7 @@ impl Config {
         let WebSection {
             mode,
             external_backends,
+            backends,
             context_size,
             allowed_domains,
             location,
@@ -495,6 +515,65 @@ impl Config {
             }
             external_web_backends.push(kind);
         }
+        let mut external_web_backend_auth = BTreeMap::new();
+        for (backend, auth) in backends {
+            let backend_name = backend.trim().to_ascii_lowercase();
+            if backend_name.is_empty() || backend_name.chars().count() > 64 {
+                bail!("[web.backends] contains an empty or oversized backend name");
+            }
+            if !backend_name.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }) {
+                bail!(
+                    "[web.backends] contains invalid backend name {:?}",
+                    backend_name
+                );
+            }
+            let kind = WebSearchBackendKind::parse(&backend_name).map_err(|error| {
+                anyhow!(
+                    "[web.backends] contains unsupported backend {:?}; {}",
+                    backend_name,
+                    error
+                )
+            })?;
+            if auth.api_key.is_some() && auth.api_key_env.is_some() {
+                bail!(
+                    "[web.backends.{}] 只能配置 api_key 或 api_key_env 其中一个",
+                    backend_name
+                );
+            }
+            let api_key_env = auth
+                .api_key_env
+                .map(|value| {
+                    let value = value.trim().to_string();
+                    if value.is_empty()
+                        || value.chars().count() > 128
+                        || value.chars().any(char::is_control)
+                    {
+                        bail!(
+                            "[web.backends.{}].api_key_env is empty, oversized, or contains control characters",
+                            backend_name
+                        );
+                    }
+                    Ok(value)
+                })
+                .transpose()?;
+            if external_web_backend_auth
+                .insert(
+                    kind,
+                    WebBackendAuth {
+                        api_key: auth.api_key,
+                        api_key_env,
+                    },
+                )
+                .is_some()
+            {
+                bail!(
+                    "[web.backends] contains duplicate backend {:?}",
+                    backend_name
+                );
+            }
+        }
         let web_search = WebSearchSettings::new(
             context_size.as_deref(),
             allowed_domains,
@@ -523,6 +602,7 @@ impl Config {
             web_mode,
             web_search,
             external_web_backends,
+            external_web_backend_auth,
             providers,
         })
     }
@@ -633,7 +713,7 @@ impl Config {
     fn resolve_external_web_backend(
         &self,
         profile: ProviderProfile,
-    ) -> Result<Option<WebSearchBackendKind>> {
+    ) -> Result<Option<(WebSearchBackendKind, WebSearchCredential)>> {
         let needs_external = match self.web_mode {
             WebMode::External => true,
             WebMode::Auto => profile != ProviderProfile::OpenAiResponses,
@@ -643,11 +723,8 @@ impl Config {
             return Ok(None);
         }
         for backend in &self.external_web_backends {
-            if std::env::var(backend.api_key_env())
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                return Ok(Some(*backend));
+            if let Some(credential) = self.resolve_web_backend_credential(*backend)? {
+                return Ok(Some((*backend, credential)));
             }
         }
         if self.web_mode == WebMode::External {
@@ -657,7 +734,7 @@ impl Config {
                 );
             }
             bail!(
-                "no configured external Web backend has credentials; set one of: {}",
+                "没有找到可用的外部 Web 搜索密钥；可在 [web.backends.<name>] 写 api_key，或设置这些环境变量: {}",
                 self.external_web_backends
                     .iter()
                     .map(|backend| backend.api_key_env())
@@ -666,6 +743,39 @@ impl Config {
             );
         }
         Ok(None)
+    }
+
+    fn resolve_web_backend_credential(
+        &self,
+        backend: WebSearchBackendKind,
+    ) -> Result<Option<WebSearchCredential>> {
+        let auth = self.external_web_backend_auth.get(&backend);
+        if let Some(api_key) = auth.and_then(|auth| auth.api_key.as_deref()) {
+            if api_key.trim().is_empty() {
+                return Ok(None);
+            }
+            return WebSearchCredential::new(api_key.to_string())
+                .map(Some)
+                .map_err(|error| {
+                    anyhow!(
+                        "[web.backends.{}].api_key 无效: {}",
+                        backend_name(backend),
+                        error
+                    )
+                });
+        }
+        let env_name = auth
+            .and_then(|auth| auth.api_key_env.as_deref())
+            .unwrap_or_else(|| backend.api_key_env());
+        let Some(value) = std::env::var(env_name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(None);
+        };
+        WebSearchCredential::new(value)
+            .map(Some)
+            .map_err(|error| anyhow!("环境变量 {} 中的 Web 搜索密钥无效: {}", env_name, error))
     }
 
     pub fn validate_selection(&self, selection: &ActiveModelSelection) -> Result<()> {
@@ -689,6 +799,15 @@ impl Config {
                 self.provider_names().join(", ")
             )
         })
+    }
+}
+
+fn backend_name(backend: WebSearchBackendKind) -> &'static str {
+    match backend {
+        WebSearchBackendKind::Tavily => "tavily",
+        WebSearchBackendKind::Brave => "brave",
+        WebSearchBackendKind::Exa => "exa",
+        WebSearchBackendKind::Serper => "serper",
     }
 }
 
@@ -1016,27 +1135,43 @@ workspace_write = "allow"
 outside_workspace = "ask"
 commands = "ask"
 
-# ---- Hosted web search ----
-# auto enables OpenAI Responses hosted web search when the selected provider supports it;
-# otherwise it uses the first configured external backend with a non-empty credential.
-# native only requests provider-hosted search. external requires a configured backend and credential;
-# disabled turns web search off.
-# The binding is frozen until the next /reload or model selection.
+# ---- Web 搜索 ----
+# mode 可选值：auto | native | external | disabled
+# auto：OpenAI Responses 使用服务商原生搜索；其他模型按 external_backends 的顺序，
+#       选择第一个能解析出非空密钥的外部搜索厂商（直接 api_key、自定义 api_key_env
+#       或厂商标准环境变量均可）。
+# native：只使用模型服务商的原生搜索；当前仅支持 OpenAI Responses，不回退到外部厂商。
+# external：强制使用外部搜索厂商；未配置厂商或找不到可用密钥时，配置加载会失败。
+# disabled：完全关闭 Web 搜索。
+# 选中的实现会保持不变，直到执行 /reload 或切换 provider/model。
 [web]
 mode = "auto"
-# External backend preference order. Credentials: TAVILY_API_KEY, BRAVE_SEARCH_API_KEY,
-# EXA_API_KEY, and SERPER_API_KEY. Only the first available backend is bound per epoch.
+# 外部搜索厂商的优先级从左到右；固定支持 tavily、brave、exa、serper。
+# 未配置厂商密钥时，依次尝试标准环境变量：TAVILY_API_KEY、BRAVE_SEARCH_API_KEY、EXA_API_KEY、SERPER_API_KEY。
+# 每次只会绑定一个厂商，不会在搜索失败后自动切换到下一个厂商。
 # external_backends = ["tavily", "brave", "exa", "serper"]
-# Optional provider hints: low | medium | high. Omit to let the provider choose.
+# 可选：搜索结果上下文量。low / medium / high 分别最多返回 3 / 5 / 10 条结果；
+# OpenAI 原生搜索会把它作为 search_context_size 提示。省略时使用服务商或 Onemore 默认值。
 # context_size = "medium"
-# Optional exact domain allowlist, normalized to lowercase (at most 100 entries).
+# 可选：只允许返回这些域名及其子域名，最多 100 个；填写纯域名，不要带协议或路径。
 # allowed_domains = ["developers.openai.com", "platform.openai.com"]
-# Optional approximate location. It is configuration, never model-controlled input.
+# 可选：搜索位置提示。该信息来自本地配置，模型不能在工具参数中修改。
 # [web.location]
 # country = "US"
 # region = "California"
 # city = "San Francisco"
 # timezone = "America/Los_Angeles"
+# 每个厂商都支持直接写 api_key，或指定 api_key_env 从环境变量读取；两者只能选一个。
+# 两者都省略时，默认读取该厂商的标准环境变量。下面的四段都是可选示例，请按需取消注释。
+# [web.backends.tavily]
+# api_key = "tvly-..."
+# [web.backends.brave]
+# api_key_env = "BRAVE_SEARCH_API_KEY"
+# [web.backends.exa]
+# api_key = "..."
+# [web.backends.serper]
+# api_key = "..."
+# 如果使用环境变量，请删除对应 api_key，改为 api_key_env = "SERPER_API_KEY"
 
 # ---- Anthropic Messages API ----
 [providers.anthropic]

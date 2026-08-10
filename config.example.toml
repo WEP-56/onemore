@@ -33,27 +33,43 @@ workspace_write = "allow"
 outside_workspace = "ask"
 commands = "ask"
 
-# ---- Hosted web search ----
-# auto enables OpenAI Responses hosted web search when the selected provider supports it;
-# otherwise it uses the first configured external backend with a non-empty credential.
-# native only requests provider-hosted search. external requires a configured backend and credential;
-# disabled turns web search off.
-# The binding is frozen until the next /reload or model selection.
+# ---- Web 搜索 ----
+# mode 可选值：auto | native | external | disabled
+# auto：OpenAI Responses 使用服务商原生搜索；其他模型按 external_backends 的顺序，
+#       选择第一个能解析出非空密钥的外部搜索厂商（直接 api_key、自定义 api_key_env
+#       或厂商标准环境变量均可）。
+# native：只使用模型服务商的原生搜索；当前仅支持 OpenAI Responses，不回退到外部厂商。
+# external：强制使用外部搜索厂商；未配置厂商或找不到可用密钥时，配置加载会失败。
+# disabled：完全关闭 Web 搜索。
+# 选中的实现会保持不变，直到执行 /reload 或切换 provider/model。
 [web]
 mode = "auto"
-# External backend preference order. Credentials: TAVILY_API_KEY, BRAVE_SEARCH_API_KEY,
-# EXA_API_KEY, and SERPER_API_KEY. Only the first available backend is bound per epoch.
+# 外部搜索厂商的优先级从左到右；固定支持 tavily、brave、exa、serper。
+# 未配置厂商密钥时，依次尝试标准环境变量：TAVILY_API_KEY、BRAVE_SEARCH_API_KEY、EXA_API_KEY、SERPER_API_KEY。
+# 每次只会绑定一个厂商，不会在搜索失败后自动切换到下一个厂商。
 # external_backends = ["tavily", "brave", "exa", "serper"]
-# Optional provider hints: low | medium | high. Omit to let the provider choose.
+# 可选：搜索结果上下文量。low / medium / high 分别最多返回 3 / 5 / 10 条结果；
+# OpenAI 原生搜索会把它作为 search_context_size 提示。省略时使用服务商或 Onemore 默认值。
 # context_size = "medium"
-# Optional exact domain allowlist, normalized to lowercase (at most 100 entries).
+# 可选：只允许返回这些域名及其子域名，最多 100 个；填写纯域名，不要带协议或路径。
 # allowed_domains = ["developers.openai.com", "platform.openai.com"]
-# Optional approximate location. It is configuration, never model-controlled input.
+# 可选：搜索位置提示。该信息来自本地配置，模型不能在工具参数中修改。
 # [web.location]
 # country = "US"
 # region = "California"
 # city = "San Francisco"
 # timezone = "America/Los_Angeles"
+# 每个厂商都支持直接写 api_key，或指定 api_key_env 从环境变量读取；两者只能选一个。
+# 两者都省略时，默认读取该厂商的标准环境变量。下面的四段都是可选示例，请按需取消注释。
+# [web.backends.tavily]
+# api_key = "tvly-..."
+# [web.backends.brave]
+# api_key_env = "BRAVE_SEARCH_API_KEY"
+# [web.backends.exa]
+# api_key = "..."
+# [web.backends.serper]
+# api_key = "..."
+# 如果使用环境变量，请删除对应 api_key，改为 api_key_env = "SERPER_API_KEY"
 
 # ---- Anthropic Messages API ----
 [providers.anthropic]

@@ -178,6 +178,64 @@ model = "model"
 }
 
 #[test]
+fn web_backend_credentials_match_provider_config_rules() {
+    let config = load_config(
+        r#"
+[agent]
+provider = "mock"
+
+[web]
+mode = "external"
+external_backends = ["tavily"]
+
+[web.backends.tavily]
+api_key = "direct-tavily-key"
+
+[providers.mock]
+api = "messages"
+profile = "anthropic"
+base_url = "https://example.invalid"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    let settings = config.resolve_provider("mock").unwrap();
+    match settings.web {
+        WebCapabilityBinding::HarnessFunction {
+            backend,
+            credential,
+            ..
+        } => {
+            assert_eq!(backend, WebSearchBackendKind::Tavily);
+            assert_eq!(credential.as_str(), "direct-tavily-key");
+        }
+        binding => panic!("expected external Web binding, got {binding:?}"),
+    }
+
+    let error = load_config(
+        r#"
+[agent]
+provider = "mock"
+[web.backends.tavily]
+api_key = "direct-key"
+api_key_env = "TAVILY_API_KEY"
+[providers.mock]
+api = "messages"
+profile = "anthropic"
+base_url = "https://example.invalid"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("只能配置 api_key 或 api_key_env"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn retry_and_turn_limits_have_stable_defaults_and_accept_overrides() {
     let default = load_config(
         r#"
