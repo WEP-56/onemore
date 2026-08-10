@@ -33,6 +33,23 @@ workspace_write = "allow"
 outside_workspace = "ask"
 commands = "ask"
 
+# ---- Hosted web search ----
+# auto enables OpenAI Responses hosted web search when the selected provider supports it.
+# native requests the provider-hosted implementation; external is reserved for a future local backend;
+# disabled turns web search off. The binding is frozen until the next /reload or model selection.
+[web]
+mode = "auto"
+# Optional provider hints: low | medium | high. Omit to let the provider choose.
+# context_size = "medium"
+# Optional exact domain allowlist, normalized to lowercase (at most 100 entries).
+# allowed_domains = ["developers.openai.com", "platform.openai.com"]
+# Optional approximate location. It is configuration, never model-controlled input.
+# [web.location]
+# country = "US"
+# region = "California"
+# city = "San Francisco"
+# timezone = "America/Los_Angeles"
+
 # ---- Anthropic Messages API ----
 [providers.anthropic]
 api = "messages"

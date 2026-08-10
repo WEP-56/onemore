@@ -10,7 +10,7 @@
 //! 3. 按接口类型的默认环境变量(ANTHROPIC_API_KEY / OPENAI_API_KEY)。
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::compaction::{CompactionSettings, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS};
 use crate::harness::ModelRegistry;
 use crate::permission::{PermissionRule, PermissionRules};
+use crate::web::{WebCapabilityBinding, WebMode, WebSearchLocation, WebSearchSettings};
 
 /// 两类接口。字符串来自 config 的 `api = "..."`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +142,9 @@ pub struct ProviderSettings {
     pub context_window: Option<u64>,
     pub selected_effort: String,
     pub reasoning_effort: ReasoningEffortPolicy,
+    /// Frozen at provider construction. Hosted Web capabilities are not local
+    /// function tools and must not be silently replaced mid-session.
+    pub web: WebCapabilityBinding,
 }
 
 // ---- config.toml 的原始形状(serde 直接映射) ----
@@ -156,7 +160,37 @@ struct FileConfig {
     #[serde(default)]
     permissions: PermissionsSection,
     #[serde(default)]
+    web: WebSection,
+    #[serde(default)]
     providers: BTreeMap<String, RawProviderSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct WebSection {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    external_backends: Vec<String>,
+    #[serde(default)]
+    context_size: Option<String>,
+    #[serde(default)]
+    allowed_domains: Vec<String>,
+    #[serde(default)]
+    location: Option<WebLocationSection>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct WebLocationSection {
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -310,6 +344,7 @@ impl ModelReasoning {
 /// 校验过的配置。
 #[derive(Debug)]
 pub struct Config {
+    pub(crate) source_path: Option<PathBuf>,
     pub active_provider: String,
     /// auto | gitbash | powershell | cmd
     pub shell: String,
@@ -321,6 +356,8 @@ pub struct Config {
     pub tool_timeout: Option<std::time::Duration>,
     pub compaction: CompactionSettings,
     pub permission_rules: PermissionRules,
+    web_mode: WebMode,
+    web_search: WebSearchSettings,
     providers: BTreeMap<String, ProviderSection>,
 }
 
@@ -417,7 +454,53 @@ impl Config {
             jitter_seed: retry_defaults.jitter_seed,
         };
         validate_retry_policy(retry_policy)?;
+        let WebSection {
+            mode,
+            external_backends,
+            context_size,
+            allowed_domains,
+            location,
+        } = raw.web;
+        let web_mode = mode.as_deref().unwrap_or("auto").trim();
+        let web_mode = WebMode::parse(&web_mode).map_err(|error| anyhow!("[web].mode {error}"))?;
+        let mut external_web_backends = Vec::new();
+        for backend in external_backends {
+            let backend = backend.trim().to_ascii_lowercase();
+            if backend.is_empty() || backend.chars().count() > 64 {
+                bail!("[web].external_backends contains an empty or oversized backend name");
+            }
+            if !backend.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            }) {
+                bail!(
+                    "[web].external_backends contains invalid backend name {:?}",
+                    backend
+                );
+            }
+            if external_web_backends
+                .iter()
+                .any(|existing| existing == &backend)
+            {
+                bail!(
+                    "[web].external_backends contains duplicate backend {:?}",
+                    backend
+                );
+            }
+            external_web_backends.push(backend);
+        }
+        let web_search = WebSearchSettings::new(
+            context_size.as_deref(),
+            allowed_domains,
+            location.map(|location| WebSearchLocation {
+                country: location.country,
+                region: location.region,
+                city: location.city,
+                timezone: location.timezone,
+            }),
+        )
+        .map_err(|error| anyhow!("[web] {error}"))?;
         Ok(Config {
+            source_path: Some(path.to_path_buf()),
             active_provider: raw.agent.provider,
             shell,
             system_prompt: raw.agent.system_prompt,
@@ -430,6 +513,8 @@ impl Config {
                 .map(std::time::Duration::from_secs),
             compaction,
             permission_rules,
+            web_mode,
+            web_search,
             providers,
         })
     }
@@ -527,6 +612,7 @@ impl Config {
             context_window: model.context_window,
             selected_effort: selection.effort.clone(),
             reasoning_effort,
+            web: WebCapabilityBinding::resolve(self.web_mode, sec.profile, self.web_search.clone()),
         })
     }
 
@@ -877,6 +963,23 @@ workspace_read = "allow"
 workspace_write = "allow"
 outside_workspace = "ask"
 commands = "ask"
+
+# ---- Hosted web search ----
+# auto enables OpenAI Responses hosted web search when the selected provider supports it.
+# native requests the provider-hosted implementation; external is reserved for a future local backend;
+# disabled turns web search off. The binding is frozen until the next /reload or model selection.
+[web]
+mode = "auto"
+# Optional provider hints: low | medium | high. Omit to let the provider choose.
+# context_size = "medium"
+# Optional exact domain allowlist, normalized to lowercase (at most 100 entries).
+# allowed_domains = ["developers.openai.com", "platform.openai.com"]
+# Optional approximate location. It is configuration, never model-controlled input.
+# [web.location]
+# country = "US"
+# region = "California"
+# city = "San Francisco"
+# timezone = "America/Los_Angeles"
 
 # ---- Anthropic Messages API ----
 [providers.anthropic]

@@ -200,14 +200,14 @@ fn builder_injected_components_are_active() {
 fn default_context_freezes_root_agents_in_pi_style_order() {
     let root = temp_root("agents-context");
     let workspace_root = root.join("workspace");
-    std::fs::create_dir_all(workspace_root.join(".onemore/skills/demo")).unwrap();
+    std::fs::create_dir_all(workspace_root.join(".agents/skills/demo")).unwrap();
     std::fs::write(
         workspace_root.join("AGENTS.md"),
         "Keep production paths unique.",
     )
     .unwrap();
     std::fs::write(
-        workspace_root.join(".onemore/skills/demo/SKILL.md"),
+        workspace_root.join(".agents/skills/demo/SKILL.md"),
         "---\nname: demo\ndescription: demo skill\n---\nbody",
     )
     .unwrap();
@@ -274,6 +274,7 @@ fn direct_in_memory_builder_needs_no_config_state_or_skills_directories() {
             context_window: Some(32_000),
             selected_effort: "medium".into(),
             reasoning_effort: ReasoningEffortPolicy::Omit,
+            web: crate::web::WebCapabilityBinding::Disabled,
         },
         Workspace::new(workspace_root),
     )
@@ -330,9 +331,9 @@ fn direct_in_memory_builder_needs_no_config_state_or_skills_directories() {
 fn startup_emits_frozen_skill_catalog_once() {
     let root = temp_root("skills-event");
     let workspace_root = root.join("workspace");
-    std::fs::create_dir_all(workspace_root.join(".onemore/skills/demo")).unwrap();
+    std::fs::create_dir_all(workspace_root.join(".agents/skills/demo")).unwrap();
     std::fs::write(
-        workspace_root.join(".onemore/skills/demo/SKILL.md"),
+        workspace_root.join(".agents/skills/demo/SKILL.md"),
         "---\nname: demo\ndescription: demo skill\n---\nbody",
     )
     .unwrap();
@@ -362,6 +363,76 @@ fn startup_emits_frozen_skill_catalog_once() {
     assert!(!events
         .iter()
         .any(|event| matches!(event, AgentEvent::SkillsDiscovered { .. })));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reload_uses_agents_skills_and_preserves_the_current_session() {
+    let root = temp_root("reload-skills");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(workspace_root.join(".onemore/skills/legacy")).unwrap();
+    std::fs::write(
+        workspace_root.join(".onemore/skills/legacy/SKILL.md"),
+        "---\nname: legacy\ndescription: legacy skill\n---\nbody",
+    )
+    .unwrap();
+    std::fs::create_dir_all(workspace_root.join(".agents/skills/demo")).unwrap();
+    let skill_path = workspace_root.join(".agents/skills/demo/SKILL.md");
+    std::fs::write(
+        &skill_path,
+        "---\nname: demo\ndescription: initial skill\n---\ninitial body",
+    )
+    .unwrap();
+    let mut agent = Agent::new_with_data_dir(
+        config(&root),
+        Workspace::new(workspace_root),
+        root.join("data"),
+    )
+    .unwrap();
+    let session_id = agent.sessions.current_id().to_string();
+    assert!(agent
+        .build_system_prompt()
+        .system_text()
+        .contains("initial skill"));
+    assert!(!agent
+        .build_system_prompt()
+        .system_text()
+        .contains("legacy skill"));
+
+    std::fs::write(
+        &skill_path,
+        "---\nname: demo\ndescription: refreshed skill\n---\nrefreshed body",
+    )
+    .unwrap();
+    let config_path = root.join("config.toml");
+    let updated = std::fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("max_turns = 2", "max_turns = 7");
+    std::fs::write(config_path, updated).unwrap();
+
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::Reload,
+        &mut |event| events.push(event),
+        &AtomicBool::new(false),
+    );
+
+    assert_eq!(agent.sessions.current_id(), session_id);
+    assert_eq!(agent.entries.len(), 0, "reload 不能修改 session facts");
+    assert_eq!(agent.max_turns, 7);
+    assert!(agent
+        .build_system_prompt()
+        .system_text()
+        .contains("refreshed skill"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SkillsDiscovered { skills, .. }
+            if skills.iter().any(|skill| skill.name == "demo")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Notice(message) if message.starts_with("reload 成功")
+    )));
     let _ = std::fs::remove_dir_all(root);
 }
 

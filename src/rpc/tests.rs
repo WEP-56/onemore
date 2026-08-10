@@ -134,6 +134,7 @@ fn test_agent(steps: Vec<ProviderStep>, tools: ToolRegistry) -> Agent {
             context_window: Some(16_000),
             selected_effort: "medium".into(),
             reasoning_effort: ReasoningEffortPolicy::Omit,
+            web: crate::web::WebCapabilityBinding::Disabled,
         },
         Workspace::new(std::env::current_dir().unwrap()),
     )

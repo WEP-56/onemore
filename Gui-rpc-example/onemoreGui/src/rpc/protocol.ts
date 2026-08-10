@@ -121,6 +121,9 @@ export interface ApprovalRequestView {
   summary: string;
   reason: string;
   scopes: ApprovalScope[];
+  command: string | null;
+  cwd: string | null;
+  targets: string[];
 }
 
 export type ApprovalDecision = "allow_once" | "allow_session" | "deny";

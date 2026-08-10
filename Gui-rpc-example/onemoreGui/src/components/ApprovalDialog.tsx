@@ -46,6 +46,11 @@ export default function ApprovalDialog() {
         </div>
         <div className="approval-toast-summary">{request.summary}</div>
         {request.reason && <div className="approval-toast-reason">{request.reason}</div>}
+        {request.command && <div className="approval-toast-reason">命令：{request.command}</div>}
+        {request.cwd && <div className="approval-toast-reason">目录：{request.cwd}</div>}
+        {request.targets.map((target) => (
+          <div className="approval-toast-reason" key={target}>目标：{target}</div>
+        ))}
         <div className="approval-toast-actions">
           {canSession && (
             <button

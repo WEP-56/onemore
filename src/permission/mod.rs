@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::tools::PreparedToolCall;
 use crate::workspace::Workspace;
 
+mod command_risk;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionRule {
     Allow,
@@ -73,6 +75,14 @@ pub struct ApprovalRequest {
     pub summary: String,
     pub reason: String,
     pub scopes: Vec<ApprovalScope>,
+    pub details: ApprovalDetails,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ApprovalDetails {
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +94,7 @@ pub enum PermissionDecision {
     Ask {
         reason: String,
         scopes: Vec<ApprovalScope>,
+        details: ApprovalDetails,
     },
 }
 
@@ -111,6 +122,8 @@ impl PermissionManager {
         let mut reasons = Vec::new();
         let mut effective = PermissionRule::Allow;
         let mut has_declared_path = false;
+        let mut forced_approval = false;
+        let mut details = ApprovalDetails::default();
 
         for argument in &call.spec.permission.path_arguments {
             has_declared_path = true;
@@ -137,12 +150,30 @@ impl PermissionManager {
         }
 
         if call.spec.permission.always_ask {
+            forced_approval = true;
+            reasons.push("工具声明了必须逐次审批且无法静态约束的副作用".into());
+        }
+
+        if let Some(command_spec) = &call.spec.permission.command {
             merge_rule(
                 &mut effective,
                 self.rules.opaque_side_effect,
                 &mut reasons,
-                "工具包含无法静态约束的外部副作用".into(),
+                "shell 命令执行".into(),
             );
+            match command_risk::assess(call, command_spec, workspace) {
+                Ok(assessment) => {
+                    details = assessment.details;
+                    if assessment.requires_approval {
+                        forced_approval = true;
+                        reasons.extend(assessment.reasons);
+                    }
+                }
+                Err(reason) => {
+                    forced_approval = true;
+                    reasons.push(format!("命令无法可靠解析: {reason}"));
+                }
+            }
         } else if effective != PermissionRule::Deny {
             let workspace_rule = if call.spec.capabilities.read_only {
                 self.rules.workspace_read
@@ -156,7 +187,9 @@ impl PermissionManager {
             } else {
                 "未声明目标的副作用"
             };
-            let rule = if !call.spec.capabilities.read_only && !has_declared_path {
+            let rule = if call.spec.permission.always_ask {
+                PermissionRule::Allow
+            } else if !call.spec.capabilities.read_only && !has_declared_path {
                 PermissionRule::Ask
             } else {
                 workspace_rule
@@ -168,12 +201,18 @@ impl PermissionManager {
             PermissionRule::Deny => PermissionDecision::Deny {
                 reason: reasons.join("；"),
             },
+            _ if forced_approval => PermissionDecision::Ask {
+                reason: reasons.join("；"),
+                scopes: vec![ApprovalScope::Once],
+                details,
+            },
             PermissionRule::Ask if self.session_grants.contains(&grant_key(call)) => {
                 PermissionDecision::Allow
             }
             PermissionRule::Ask => PermissionDecision::Ask {
                 reason: reasons.join("；"),
                 scopes: vec![ApprovalScope::Once, ApprovalScope::Session],
+                details,
             },
             PermissionRule::Allow => PermissionDecision::Allow,
         }
@@ -437,12 +476,12 @@ mod tests {
         let mut manager = PermissionManager::new(PermissionRules::default());
         let first = prepared(
             ToolCapabilities::COMMAND,
-            ToolPermissionSpec::opaque_side_effect(&[]),
+            ToolPermissionSpec::default(),
             json!({ "path": "one" }),
         );
         let second = prepared(
             ToolCapabilities::COMMAND,
-            ToolPermissionSpec::opaque_side_effect(&[]),
+            ToolPermissionSpec::default(),
             json!({ "path": "two" }),
         );
         manager.remember_session_grant(&first);
@@ -453,6 +492,74 @@ mod tests {
         assert!(matches!(
             manager.evaluate(&second, &workspace),
             PermissionDecision::Ask { .. }
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opaque_side_effect_is_forced_once_even_when_all_rules_allow() {
+        let root = temp_root("forced-once");
+        let workspace = Workspace::new(root.clone());
+        let mut manager = PermissionManager::new(PermissionRules {
+            workspace_read: PermissionRule::Allow,
+            workspace_write: PermissionRule::Allow,
+            outside_workspace: PermissionRule::Allow,
+            opaque_side_effect: PermissionRule::Allow,
+        });
+        let call = prepared(
+            ToolCapabilities::COMMAND,
+            ToolPermissionSpec::opaque_side_effect(&[]),
+            json!({ "path": "same" }),
+        );
+        manager.remember_session_grant(&call);
+        assert!(matches!(
+            manager.evaluate(&call, &workspace),
+            PermissionDecision::Ask {
+                scopes,
+                ..
+            } if scopes == vec![ApprovalScope::Once]
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dangerous_command_is_forced_once_but_ordinary_command_obeys_allow() {
+        let root = temp_root("command-boundary");
+        let workspace = Workspace::new(root.clone());
+        let manager = PermissionManager::new(PermissionRules {
+            workspace_read: PermissionRule::Allow,
+            workspace_write: PermissionRule::Allow,
+            outside_workspace: PermissionRule::Allow,
+            opaque_side_effect: PermissionRule::Allow,
+        });
+        let permission =
+            ToolPermissionSpec::command("path", None, crate::tools::CommandSyntax::PowerShell);
+        let safe = prepared(
+            ToolCapabilities::COMMAND,
+            permission.clone(),
+            json!({ "path": "Get-ChildItem" }),
+        );
+        assert_eq!(
+            manager.evaluate(&safe, &workspace),
+            PermissionDecision::Allow
+        );
+
+        let dangerous = prepared(
+            ToolCapabilities::COMMAND,
+            permission,
+            json!({ "path": "Get-ChildItem | Remove-Item -Recurse" }),
+        );
+        assert!(matches!(
+            manager.evaluate(&dangerous, &workspace),
+            PermissionDecision::Ask {
+                scopes,
+                details: ApprovalDetails {
+                    command: Some(_),
+                    cwd: Some(_),
+                    ..
+                },
+                ..
+            } if scopes == vec![ApprovalScope::Once]
         ));
         let _ = std::fs::remove_dir_all(root);
     }

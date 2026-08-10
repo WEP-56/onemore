@@ -12,6 +12,7 @@ pub enum SlashCommand {
     Skill,
     Queue,
     Compact,
+    Reload,
     Clear,
     Help,
     Quit,
@@ -67,6 +68,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         command: SlashCommand::Compact,
         name: "compact",
         description: "压缩历史:摘要替代模型视图,事实日志保留",
+        accepts_args: false,
+    },
+    CommandSpec {
+        command: SlashCommand::Reload,
+        name: "reload",
+        description: "重新加载配置、项目指令和 skills",
         accepts_args: false,
     },
     CommandSpec {
@@ -176,5 +183,13 @@ mod tests {
     fn copy_command_is_not_available() {
         assert!(find("copy").is_none());
         assert!(matches("copy").is_empty());
+    }
+
+    #[test]
+    fn reload_command_is_discoverable() {
+        assert_eq!(
+            find("reload").map(|spec| spec.command),
+            Some(SlashCommand::Reload)
+        );
     }
 }

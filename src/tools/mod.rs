@@ -13,11 +13,15 @@ use crate::util;
 use crate::workspace::Workspace;
 
 mod edit_file;
+mod git;
+mod glob;
 mod list_dir;
 mod load_skill;
 mod read_file;
 mod run_command;
+mod search;
 mod update_plan;
+mod workspace_walk;
 mod write_file;
 
 pub use run_command::{detect_shell, Shell};
@@ -78,6 +82,21 @@ pub struct ToolSpec {
 pub struct ToolPermissionSpec {
     pub path_arguments: Vec<String>,
     pub always_ask: bool,
+    pub command: Option<CommandPermissionSpec>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSyntax {
+    Posix,
+    PowerShell,
+    Cmd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPermissionSpec {
+    pub argument: String,
+    pub cwd_argument: Option<String>,
+    pub syntax: CommandSyntax,
 }
 
 impl ToolPermissionSpec {
@@ -88,9 +107,12 @@ impl ToolPermissionSpec {
                 .map(|argument| (*argument).into())
                 .collect(),
             always_ask: false,
+            command: None,
         }
     }
 
+    /// Side effects which cannot be safely classified are a harness-enforced approval
+    /// boundary. Configuration and session grants cannot bypass this declaration.
     pub fn opaque_side_effect(arguments: &[&str]) -> Self {
         ToolPermissionSpec {
             path_arguments: arguments
@@ -98,6 +120,19 @@ impl ToolPermissionSpec {
                 .map(|argument| (*argument).into())
                 .collect(),
             always_ask: true,
+            command: None,
+        }
+    }
+
+    pub fn command(argument: &str, cwd_argument: Option<&str>, syntax: CommandSyntax) -> Self {
+        ToolPermissionSpec {
+            path_arguments: cwd_argument.into_iter().map(str::to_string).collect(),
+            always_ask: false,
+            command: Some(CommandPermissionSpec {
+                argument: argument.into(),
+                cwd_argument: cwd_argument.map(str::to_string),
+                syntax,
+            }),
         }
     }
 }
@@ -530,6 +565,10 @@ fn default_tools(shell: Shell) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(read_file::ReadFile),
         Box::new(list_dir::ListDir),
+        Box::new(glob::Glob),
+        Box::new(search::Search),
+        Box::new(git::RepoState),
+        Box::new(git::GitDiff),
         Box::new(write_file::WriteFile),
         Box::new(edit_file::EditFile),
         Box::new(run_command::RunCommand::new(shell)),

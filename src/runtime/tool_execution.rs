@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::event::AgentEvent;
 use crate::hooks::HookRegistry;
 use crate::permission::{
-    ApprovalDecision, ApprovalRequest, ApprovalResponse, ApprovalScope, PermissionDecision,
-    PermissionManager,
+    ApprovalDecision, ApprovalDetails, ApprovalRequest, ApprovalResponse, ApprovalScope,
+    PermissionDecision, PermissionManager,
 };
 use crate::plan::{reduce_plan, validate_transition as validate_plan_transition, PlanSnapshot};
 use crate::session::SessionEntry;
@@ -105,8 +105,14 @@ impl DefaultToolExecutor<'_> {
             PermissionDecision::Deny { reason } => {
                 return settled(permission_denied(reason));
             }
-            PermissionDecision::Ask { reason, scopes } => {
-                if let Err(error) = self.request_approval(&prepared, reason, scopes, emit, cancel) {
+            PermissionDecision::Ask {
+                reason,
+                scopes,
+                details,
+            } => {
+                if let Err(error) =
+                    self.request_approval(&prepared, reason, scopes, details, emit, cancel)
+                {
                     return settled(ToolOutcome::failure(error));
                 }
             }
@@ -344,6 +350,7 @@ impl DefaultToolExecutor<'_> {
         prepared: &PreparedToolCall,
         reason: String,
         scopes: Vec<ApprovalScope>,
+        details: ApprovalDetails,
         emit: &mut dyn FnMut(AgentEvent),
         cancel: &AtomicBool,
     ) -> Result<(), ToolError> {
@@ -353,7 +360,8 @@ impl DefaultToolExecutor<'_> {
             tool: prepared.spec.name.clone(),
             summary: util::args_summary(&prepared.arguments),
             reason,
-            scopes,
+            scopes: scopes.clone(),
+            details,
         };
         emit(AgentEvent::PermissionRequested { request });
 
@@ -387,7 +395,7 @@ impl DefaultToolExecutor<'_> {
                     )));
                 }
                 Ok(response) => match response.decision {
-                    ApprovalDecision::Allow(scope) => {
+                    ApprovalDecision::Allow(scope) if scopes.contains(&scope) => {
                         if scope == ApprovalScope::Session {
                             self.permissions.remember_session_grant(prepared);
                         }
@@ -396,6 +404,16 @@ impl DefaultToolExecutor<'_> {
                             allowed: true,
                         });
                         return Ok(());
+                    }
+                    ApprovalDecision::Allow(_) => {
+                        emit(AgentEvent::PermissionResolved {
+                            request_id,
+                            allowed: false,
+                        });
+                        return Err(ToolError::new(
+                            ToolErrorCode::PermissionDenied,
+                            "审批响应请求了本次审批未提供的授权范围",
+                        ));
                     }
                     ApprovalDecision::Deny => {
                         emit(AgentEvent::PermissionResolved {

@@ -8,6 +8,7 @@
 - [API 兼容性与 Chat Completions 删除](docs/api-compatibility.md)
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
 - [CacheBoard 测试项目需求书](docs/cacheboard-test-project-cn.md)
+- [Workspace and Web tools](docs/workspace-and-web-tools.md)
 
 Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出的独立 coding agent 工程
 
@@ -264,8 +265,8 @@ Zerone 是刻意压低复杂度的可运行基线;Onemore 在同一架构骨架�
 
 ### 8. Skills
 
-- 启动时扫描当前 workspace 的 `.onemore/skills/**/SKILL.md` 与平台全局目录的
-  `skills/**/SKILL.md`（Windows 默认 `%APPDATA%\onemore\skills`，也可用
+- 启动时扫描当前 workspace 的 `.agents/skills/**/SKILL.md` 与平台 user-agent root 下的
+  `.agents/skills/**/SKILL.md`（Windows 默认 `%APPDATA%\onemore\.agents\skills`，也可用
   `ONEMORE_HOME` 覆盖），目录快照在
   当前 Runtime 内冻结。Repo 技能覆盖 User 同名技能，单个坏文件只产生警告。
 - `SKILL.md` 需要 YAML frontmatter 中的 `name` 与 `description`；system prompt
@@ -339,8 +340,9 @@ workspace/provider/model 保存；切回该模型的 `default_effort` 时删除�
     <session-id>.db            # schema v4:事实日志 + 严格计划 reducer + token/cache 用量
   workspaces/
     <workspace-hash>.json      # 仅保存偏离各模型 default_effort 的思考程度
-  skills/
-    <skill-name>/SKILL.md      # 全局技能；工作区技能位于当前项目 .onemore/skills/
+  .agents/
+    skills/
+      <skill-name>/SKILL.md  # 用户级技能；工作区技能位于当前项目 .agents/skills/
 ```
 
 Onemore 不读取 `~/.zerone`,也不识别 `ZERONE_HOME`,因此两个程序的配置、密钥和会话

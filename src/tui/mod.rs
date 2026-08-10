@@ -528,6 +528,11 @@ impl App {
                                 crate::sdk::ApprovalScopeView::Session => ApprovalScope::Session,
                             })
                             .collect(),
+                        details: crate::permission::ApprovalDetails {
+                            command: request.command,
+                            cwd: request.cwd,
+                            targets: request.targets,
+                        },
                     },
                     selected: 0,
                 });
@@ -1484,6 +1489,9 @@ impl App {
             command::SlashCommand::Compact => {
                 self.runtime.submit(AgentCommand::Compact);
             }
+            command::SlashCommand::Reload => {
+                self.runtime.submit(AgentCommand::Reload);
+            }
             command::SlashCommand::Queue => {
                 if rest.is_empty() {
                     self.transcript
@@ -2084,6 +2092,17 @@ fn draw_approval(frame: &mut Frame, area: Rect, request: &ApprovalRequest, selec
             Span::raw(util::ellipsis(&request.summary, 180)),
         ]),
         Line::from(vec![
+            Span::styled("  目录  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(
+                request
+                    .details
+                    .cwd
+                    .as_deref()
+                    .map(|cwd| util::ellipsis(cwd, 180))
+                    .unwrap_or_else(|| "-".into()),
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("  原因  ", Style::default().fg(Color::DarkGray)),
             Span::raw(request.reason.clone()),
         ]),
@@ -2400,7 +2419,7 @@ mod tests {
                 name: "demo".into(),
                 description: "demo skill".into(),
                 scope: crate::skills::SkillScope::Repo,
-                path: "workspace/.onemore/skills/demo/SKILL.md".into(),
+                path: "workspace/.agents/skills/demo/SKILL.md".into(),
                 content_hash: [0; 32],
             }],
             warnings: Vec::new(),
@@ -2536,6 +2555,7 @@ mod tests {
                 summary: "action=true".into(),
                 reason: "external side effect".into(),
                 scopes: vec![ApprovalScope::Once, ApprovalScope::Session],
+                details: crate::permission::ApprovalDetails::default(),
             },
         });
         assert!(matches!(app.overlay, Some(Overlay::Approval { .. })));
@@ -2563,6 +2583,7 @@ mod tests {
                 summary: String::new(),
                 reason: "ask".into(),
                 scopes: vec![ApprovalScope::Once],
+                details: crate::permission::ApprovalDetails::default(),
             },
         });
         app.on_key(KeyCode::Right, KeyModifiers::NONE);

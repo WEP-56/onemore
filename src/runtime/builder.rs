@@ -50,6 +50,7 @@ pub struct AgentBuilder {
     tool_timeout: Option<Duration>,
     permission_rules: PermissionRules,
     data_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
     provider_factory: ProviderFactory,
     tools: Option<ToolRegistry>,
     context_providers: Option<Vec<Box<dyn ContextProvider>>>,
@@ -65,6 +66,7 @@ pub struct AgentBuilder {
 
 impl AgentBuilder {
     pub fn new(config: Config, workspace: Workspace) -> Self {
+        let config_path = config.source_path.clone();
         let shell = config.shell.clone();
         let system_prompt = config.system_prompt.clone();
         let max_turns = config.max_turns;
@@ -80,6 +82,7 @@ impl AgentBuilder {
         builder.tool_timeout = tool_timeout;
         builder.compaction_settings = compaction_settings;
         builder.permission_rules = permission_rules;
+        builder.config_path = config_path;
         builder
     }
 
@@ -106,6 +109,7 @@ impl AgentBuilder {
             tool_timeout: None,
             permission_rules: PermissionRules::default(),
             data_dir: None,
+            config_path: None,
             provider_factory: Arc::new(build_provider),
             tools: None,
             context_providers: None,
@@ -256,12 +260,14 @@ impl AgentBuilder {
         };
 
         let shell = detect_shell(&self.shell);
+        let reloadable_skills = matches!(self.skills, SkillsMode::Discover);
+        let skills_enabled = !matches!(self.skills, SkillsMode::Disabled);
         let (skills, skill_warnings) = match self.skills {
             SkillsMode::Discover => {
                 let paths = paths.as_ref().expect("default skills require app paths");
                 let discovered = discover(
-                    &self.workspace.root().join(".onemore").join("skills"),
-                    &paths.root.join("skills"),
+                    &self.workspace.root().join(".agents").join("skills"),
+                    &paths.root.join(".agents").join("skills"),
                 );
                 (Some(Arc::new(discovered.catalog)), discovered.warnings)
             }
@@ -269,6 +275,8 @@ impl AgentBuilder {
             SkillsMode::Disabled => (None, Vec::new()),
         };
         let mut project_instructions_warning = None;
+        let default_context = self.context_providers.is_none();
+        let default_tools = self.tools.is_none();
         let mut extra_context = if let Some(providers) = self.context_providers {
             providers
         } else {
@@ -318,6 +326,7 @@ impl AgentBuilder {
 
         let settings = self.models.resolve_selection(&active_selection)?;
         let budget = budget_from_settings(&settings);
+        let web_label = settings.web.label();
         let provider = (self.provider_factory)(settings);
         let sessions: Box<dyn SessionBackend> = match self.session_backend {
             Some(backend) => backend,
@@ -344,6 +353,7 @@ impl AgentBuilder {
                 warnings: skill_warnings,
             });
         }
+        startup_events.push_back(AgentEvent::Notice(format!("Web capability: {}", web_label)));
 
         Ok(Agent {
             workspace: self.workspace,
@@ -369,6 +379,11 @@ impl AgentBuilder {
             hooks: self.hooks.unwrap_or_default(),
             startup_events,
             approval_rx: None,
+            config_path: self.config_path,
+            data_root: paths.as_ref().map(|paths| paths.root.clone()),
+            default_context,
+            default_tools,
+            reloadable_skills: reloadable_skills && skills_enabled,
             deferred: Default::default(),
         })
     }

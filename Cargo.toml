@@ -26,6 +26,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 # HTTP:选阻塞式 ureq 而非 reqwest/tokio——没有异步运行时,数据流一眼可见
 ureq = "2"
+# Workspace discovery and content search reuse ripgrep's underlying crates.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+# URL validation and canonicalization for provider-supplied web citations.
+url = "2"
 # TUI:只依赖 ratatui,crossterm 用它的 re-export,避免版本错配
 ratatui = "0.29"
 # 文本换行(正确处理 CJK 宽度)

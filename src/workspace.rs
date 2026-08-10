@@ -65,6 +65,12 @@ impl Workspace {
         }
     }
 
+    /// Model-facing paths use `/` on every platform so they can be copied
+    /// into JSON tool arguments without introducing Windows escape sequences.
+    pub fn display_model_path(&self, p: &Path) -> String {
+        self.display(p).replace('\\', "/")
+    }
+
     /// 在同一文件的 mutation 锁内执行 `f`(完整的 read-modify-write)。
     /// 锁键优先取真实 canonical path;文件尚不存在时退回词法归一化路径
     /// (Windows 上统一小写)。锁表随会话生存,不做逐项回收——键的数量
@@ -191,6 +197,14 @@ mod tests {
         let ws = Workspace::new(PathBuf::from(r"E:\proj"));
         assert_eq!(ws.display(Path::new(r"E:\proj\src\a.rs")), r"src\a.rs");
         assert_eq!(ws.display(Path::new(r"D:\other\b.rs")), r"D:\other\b.rs");
+        assert_eq!(
+            ws.display_model_path(Path::new(r"E:\proj\src\a.rs")),
+            "src/a.rs"
+        );
+        assert_eq!(
+            ws.display_model_path(Path::new(r"D:\other\b.rs")),
+            "D:/other/b.rs"
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ use crate::config::{ProviderSettings, ReasoningEffortPolicy};
 use crate::context::PromptContext;
 use crate::message::{Block, CacheUsage, ChatMessage, Role, StopReason, Usage};
 use crate::tools::ToolSpec;
+use crate::web::{append_sources_to_text, sources_from_openai_message};
 
 /// 标记 Thinking.raw 属于本适配器(切换 provider 后不会误回传)。
 const KIND: &str = "openai_responses";
@@ -145,31 +146,34 @@ impl ResponsesProvider {
         if !system.is_empty() {
             body["instructions"] = json!(system);
         }
-        if !tools.is_empty() {
+        let mut request_tools = super::sorted_tools(tools)
+            .into_iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.schema,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(web_tool) = self.settings.web.openai_native_tool() {
+            request_tools.push(web_tool);
+        }
+        if !request_tools.is_empty() {
             // 注意:Responses 的工具声明是平铺的,没有 function 包一层
-            body["tools"] = Value::Array(
-                super::sorted_tools(tools)
-                    .into_iter()
-                    .map(|t| {
-                        json!({
-                            "type": "function",
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.schema,
-                        })
-                    })
-                    .collect(),
-            );
+            body["tools"] = Value::Array(request_tools);
         }
         if let Some(n) = self.settings.max_tokens {
             body["max_output_tokens"] = json!(n);
         }
         if capabilities.prompt_cache_key {
-            body["prompt_cache_key"] = json!(super::prompt_cache_key(
+            body["prompt_cache_key"] = json!(super::prompt_cache_key_with_web(
                 self.settings.profile,
                 &self.settings.model,
                 prompt,
                 tools,
+                &self.settings.web,
             ));
         }
         body
@@ -200,6 +204,7 @@ fn block_from_item(item: &Value, encrypted_reasoning_replay: bool) -> Option<Blo
                     }
                 }
             }
+            let text = append_sources_to_text(text, &sources_from_openai_message(item));
             if text.is_empty() {
                 None
             } else {
@@ -298,12 +303,13 @@ impl ResponsesProvider {
             headers.push(("authorization", format!("Bearer {}", self.settings.api_key)));
         }
         let body = self.build_body(prompt, tools);
-        let prompt_fingerprint = super::prompt_fingerprint(
+        let prompt_fingerprint = super::prompt_fingerprint_with_web(
             self.settings.profile,
             &self.settings.model,
             &self.settings.reasoning_effort,
             prompt,
             tools,
+            &self.settings.web,
         );
         let reader = post_sse(&self.agent, &url, &headers, &body)?;
         let mut sse = SseReader::new(reader);
@@ -498,6 +504,7 @@ impl ResponsesProvider {
 mod tests {
     use super::*;
     use crate::config::{ApiKind, ProviderProfile};
+    use crate::web::WebCapabilityBinding;
 
     fn provider() -> ResponsesProvider {
         ResponsesProvider::new(ProviderSettings {
@@ -511,6 +518,7 @@ mod tests {
             context_window: None,
             selected_effort: "medium".into(),
             reasoning_effort: ReasoningEffortPolicy::Omit,
+            web: WebCapabilityBinding::OpenAiNative(Default::default()),
         })
     }
 
@@ -569,6 +577,15 @@ mod tests {
         // 工具声明是平铺的(没有 function 包一层)
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert!(body["tools"][0].get("function").is_none());
+        assert_eq!(body["tools"][1]["type"], "web_search");
+    }
+
+    #[test]
+    fn disabled_web_binding_does_not_register_a_hosted_tool() {
+        let mut settings = provider().settings;
+        settings.web = WebCapabilityBinding::Disabled;
+        let body = ResponsesProvider::new(settings).build_body(&PromptContext::default(), &[]);
+        assert!(body.get("tools").is_none());
     }
 
     #[test]

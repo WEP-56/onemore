@@ -3,6 +3,7 @@ use super::{
     ReasoningEffortPolicy, EXAMPLE_CONFIG,
 };
 use crate::permission::PermissionRule;
+use crate::web::WebCapabilityBinding;
 use std::time::Duration;
 
 fn load_config(text: &str) -> anyhow::Result<Config> {
@@ -67,6 +68,84 @@ model = "model"
     assert!(!disabled.compaction.enabled);
     assert_eq!(disabled.compaction.reserve_tokens, 1234);
     assert_eq!(disabled.compaction.keep_recent_tokens, 5678);
+}
+
+#[test]
+fn web_settings_are_normalized_and_bound_only_to_openai_responses() {
+    let config = load_config(
+        r#"
+[agent]
+provider = "openai"
+
+[web]
+mode = "native"
+context_size = "high"
+allowed_domains = ["EXAMPLE.com.", "docs.example.com"]
+
+[web.location]
+country = "us"
+region = "California"
+city = "San Francisco"
+timezone = "America/Los_Angeles"
+
+[providers.openai]
+api = "responses"
+profile = "openai"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+
+[providers.anthropic]
+api = "messages"
+profile = "anthropic"
+base_url = "https://example.invalid"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+
+    let openai = config.resolve_provider("openai").unwrap();
+    let tool = openai.web.openai_native_tool().unwrap();
+    assert_eq!(tool["type"], "web_search");
+    assert_eq!(tool["search_context_size"], "high");
+    assert_eq!(
+        tool["filters"]["allowed_domains"],
+        serde_json::json!(["example.com", "docs.example.com"])
+    );
+    assert_eq!(tool["user_location"]["country"], "US");
+    assert_eq!(
+        config.resolve_provider("anthropic").unwrap().web,
+        WebCapabilityBinding::Disabled
+    );
+}
+
+#[test]
+fn invalid_web_settings_are_rejected() {
+    let base = r#"
+[agent]
+provider = "mock"
+[web]
+WEB_SETTING
+[providers.mock]
+api = "responses"
+profile = "openai"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#;
+    for (setting, expected) in [
+        ("mode = \"unsupported\"", "[web].mode"),
+        ("context_size = \"huge\"", "context_size"),
+        (
+            "allowed_domains = [\"https://example.com\"]",
+            "allowed_domains",
+        ),
+        ("[web.location]\ncountry = \"USA\"", "location.country"),
+    ] {
+        let error = load_config(&base.replace("WEB_SETTING", setting)).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
 }
 
 #[test]

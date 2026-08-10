@@ -222,7 +222,7 @@ fn approval_rejection_is_a_tool_result_not_a_runtime_failure() {
     let executions = install_counted_tool(
         &mut agent,
         ToolCapabilities::COMMAND,
-        ToolPermissionSpec::opaque_side_effect(&[]),
+        ToolPermissionSpec::default(),
     );
     agent.provider = Box::new(ScriptedProvider::new(vec![
         ScriptStep::Output(first),
@@ -281,7 +281,7 @@ fn session_approval_only_skips_identical_following_call() {
     let executions = install_counted_tool(
         &mut agent,
         ToolCapabilities::COMMAND,
-        ToolPermissionSpec::opaque_side_effect(&[]),
+        ToolPermissionSpec::default(),
     );
     agent.provider = Box::new(ScriptedProvider::new(vec![
         ScriptStep::Output(first),
@@ -308,6 +308,66 @@ fn session_approval_only_skips_identical_following_call() {
 
     assert_eq!(requests, 1);
     assert_eq!(executions.load(Ordering::Relaxed), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn forced_approval_rejects_unoffered_session_scope_without_execution() {
+    let root = temp_root("approval-forced-scope");
+    let first = tool_turn(vec![("counted", serde_json::json!({ "path": "opaque" }))]);
+    let second = output(ChatMessage::empty_assistant(), StopReason::EndTurn);
+    let mut agent = Agent::new_with_data_dir(
+        config(&root),
+        Workspace::new(root.clone()),
+        root.join("data"),
+    )
+    .unwrap();
+    agent.permissions = PermissionManager::new(PermissionRules {
+        workspace_read: PermissionRule::Allow,
+        workspace_write: PermissionRule::Allow,
+        outside_workspace: PermissionRule::Allow,
+        opaque_side_effect: PermissionRule::Allow,
+    });
+    let executions = install_counted_tool(
+        &mut agent,
+        ToolCapabilities::COMMAND,
+        ToolPermissionSpec::opaque_side_effect(&[]),
+    );
+    agent.provider = Box::new(ScriptedProvider::new(vec![
+        ScriptStep::Output(first),
+        ScriptStep::Output(second),
+    ]));
+    let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+    agent.approval_rx = Some(approval_rx);
+    let mut events = Vec::new();
+    agent.handle_command(
+        AgentCommand::UserInput("invalid scope".into()),
+        &mut |event| {
+            if let AgentEvent::PermissionRequested { request } = &event {
+                assert_eq!(request.scopes, vec![ApprovalScope::Once]);
+                approval_tx
+                    .send(ApprovalResponse {
+                        request_id: request.request_id.clone(),
+                        decision: ApprovalDecision::Allow(ApprovalScope::Session),
+                    })
+                    .unwrap();
+            }
+            events.push(event);
+        },
+        &AtomicBool::new(false),
+    );
+
+    assert_eq!(executions.load(Ordering::Relaxed), 0);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallFinished {
+            error: Some(ToolError {
+                code: ToolErrorCode::PermissionDenied,
+                ..
+            }),
+            ..
+        }
+    )));
     let _ = std::fs::remove_dir_all(root);
 }
 

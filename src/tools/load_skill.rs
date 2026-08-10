@@ -26,10 +26,12 @@ impl Tool for LoadSkill {
             description: "Load the full instructions for one skill from the startup catalog. "
                 .to_string()
                 + "Use this before following a named skill. If the user asks to install a skill "
-                + "or provides a documentation/GitHub link, ask whether the target is global or "
-                + "workspace-local and confirm their intent, then use the existing run_command "
-                + "or write_file tools to install it; those tools enforce normal permissions. "
-                + "The catalog refreshes after restarting Onemore.",
+                + "or provides a documentation/GitHub link, ask whether the target is user-level or "
+                + "workspace-local and confirm their intent. Install workspace skills at "
+                + ".agents/skills/<skill-name>/SKILL.md and user skills at "
+                + "<user-agent-root>/.agents/skills/<skill-name>/SKILL.md. Then use the existing "
+                + "run_command or write_file tools; those tools enforce normal permissions. Use /reload "
+                + "before loading a newly installed skill.",
             schema: json!({
                 "type": "object",
                 "additionalProperties": false,

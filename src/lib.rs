@@ -31,4 +31,5 @@ pub mod storage;
 pub mod tools;
 pub mod tui;
 pub mod util;
+pub mod web;
 pub mod workspace;

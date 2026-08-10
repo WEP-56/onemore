@@ -209,6 +209,9 @@ pub struct ApprovalRequestView {
     pub summary: String,
     pub reason: String,
     pub scopes: Vec<ApprovalScopeView>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -581,6 +584,9 @@ impl From<&ApprovalRequest> for ApprovalRequestView {
                     ApprovalScope::Session => ApprovalScopeView::Session,
                 })
                 .collect(),
+            command: request.details.command.clone(),
+            cwd: request.details.cwd.clone(),
+            targets: request.details.targets.clone(),
         }
     }
 }

@@ -37,6 +37,8 @@ pub enum AgentCommand {
     /// 压缩当前会话:调模型生成摘要,作为 Compaction 事实追加
     /// (事实日志不减少,模型视图从摘要之后开始)。
     Compact,
+    /// 重新读取配置、项目指令和默认 skill catalog；只在空闲时执行。
+    Reload,
     /// 清空会话历史(/clear)。
     ClearConversation,
     /// 切换到 config.toml 里的另一个 provider profile(/provider)。

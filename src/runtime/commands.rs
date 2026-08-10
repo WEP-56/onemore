@@ -3,14 +3,23 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::{ActiveModelSelection, Config, ProviderSettings};
+use crate::context::instructions::Instructions;
+use crate::context::project_instructions::ProjectInstructions;
+use crate::context::skills::SkillsContext;
+use crate::context::workspace_info::WorkspaceInfo;
+use crate::context::ContextProvider;
 use crate::event::{AgentCommand, AgentEvent};
 use crate::message::Usage;
+use crate::permission::PermissionManager;
 use crate::session::{ModelChangeRecord, SessionEntryPayload};
 use crate::workspace::Workspace;
 
 use super::agent_loop::RunReport;
 use super::inbox::CommandInbox;
 use super::{budget_from_settings, Agent, AgentBuilder};
+use crate::skills::discover;
+use crate::storage::AppPaths;
+use crate::tools::{default_registry, default_registry_without_skills, detect_shell};
 
 pub(super) struct HandleReport {
     pub keep_running: bool,
@@ -107,6 +116,13 @@ impl Agent {
             }
             AgentCommand::Compact => {
                 self.compact(emit, cancel);
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
+            }
+            AgentCommand::Reload => {
+                self.reload(emit);
                 HandleReport {
                     keep_running: true,
                     run: None,
@@ -248,6 +264,145 @@ impl Agent {
         Ok(selection)
     }
 
+    /// Reload file-backed configuration and the default context/tool assembly while preserving
+    /// the session backend, facts, model preferences, and conversation history.
+    fn reload(&mut self, emit: &mut dyn FnMut(AgentEvent)) {
+        let Some(config_path) = self.config_path.clone() else {
+            emit(AgentEvent::Error(
+                "当前 Agent 没有可重载的配置文件来源".into(),
+            ));
+            return;
+        };
+        let config = match Config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                emit(AgentEvent::Error(format!("reload 配置失败: {error:#}")));
+                return;
+            }
+        };
+        let shell = detect_shell(&config.shell);
+        let config_path = config.source_path.clone();
+        let system_prompt = config.system_prompt.clone();
+        let max_turns = config.max_turns;
+        let retry_policy = config.retry_policy;
+        let tool_timeout = config.tool_timeout;
+        let compaction_settings = config.compaction;
+        let permission_rules = config.permission_rules;
+
+        let paths = match self.data_root.clone() {
+            Some(root) => AppPaths::from_root(root),
+            None => match AppPaths::discover() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    emit(AgentEvent::Error(format!(
+                        "reload 定位数据目录失败: {error:#}"
+                    )));
+                    return;
+                }
+            },
+        };
+        let (skills, skill_warnings) = if self.reloadable_skills {
+            let discovered = discover(
+                &self.workspace.root().join(".agents").join("skills"),
+                &paths.root.join(".agents").join("skills"),
+            );
+            (
+                Some(std::sync::Arc::new(discovered.catalog)),
+                discovered.warnings,
+            )
+        } else {
+            (None, Vec::new())
+        };
+
+        let mut extra_context = None;
+        if self.default_context {
+            let mut providers: Vec<Box<dyn ContextProvider>> =
+                vec![Box::new(if self.reloadable_skills {
+                    Instructions::new(system_prompt)
+                } else {
+                    Instructions::without_skills(system_prompt)
+                })];
+            match ProjectInstructions::discover(&self.workspace) {
+                Ok(Some(project)) => providers.push(Box::new(project)),
+                Ok(None) => {}
+                Err(error) => emit(AgentEvent::Notice(format!(
+                    "reload 未加载 workspace AGENTS.md: {error}"
+                ))),
+            }
+            if let Some(catalog) = &skills {
+                providers.push(Box::new(SkillsContext::new(std::sync::Arc::clone(catalog))));
+            }
+            providers.push(Box::new(WorkspaceInfo::new(&shell)));
+            extra_context = Some(providers);
+        }
+
+        let models: Box<dyn crate::harness::ModelRegistry> = Box::new(config);
+        let mut selection = match models.initial_selection() {
+            Ok(selection) => selection,
+            Err(error) => {
+                emit(AgentEvent::Error(format!("reload 选择模型失败: {error:#}")));
+                return;
+            }
+        };
+        if let Some(saved) = self
+            .model_preferences
+            .effort(&selection.provider, &selection.model)
+        {
+            let mut preferred = selection.clone();
+            preferred.effort = saved.to_string();
+            if models.validate_selection(&preferred).is_ok() {
+                selection = preferred;
+            }
+        }
+        let settings = match models.resolve_selection(&selection) {
+            Ok(settings) => settings,
+            Err(error) => {
+                emit(AgentEvent::Error(format!(
+                    "reload 解析 provider 失败: {error:#}"
+                )));
+                return;
+            }
+        };
+        let budget = budget_from_settings(&settings);
+        let web_label = settings.web.label();
+        let provider = (self.provider_factory)(settings);
+        if let Err(error) = compaction_settings.validate() {
+            emit(AgentEvent::Error(format!("reload 压缩配置失败: {error:#}")));
+            return;
+        }
+
+        if let Some(context) = extra_context {
+            self.extra_context = context;
+        }
+        if self.default_tools {
+            self.tools = match &skills {
+                Some(catalog) => default_registry(shell, std::sync::Arc::clone(catalog)),
+                None => default_registry_without_skills(shell),
+            };
+        }
+        self.models = models;
+        self.provider = provider;
+        self.active_selection = selection;
+        self.budget = budget;
+        self.max_turns = max_turns;
+        self.retry_policy = retry_policy;
+        self.tool_timeout = tool_timeout;
+        self.compaction_settings = compaction_settings;
+        self.permissions = PermissionManager::new(permission_rules);
+        self.config_path = config_path;
+        self.data_root = Some(paths.root);
+        if let Some(catalog) = skills {
+            emit(AgentEvent::SkillsDiscovered {
+                skills: catalog.ordered.clone(),
+                warnings: skill_warnings,
+            });
+        }
+        emit(AgentEvent::Notice(
+            "reload 成功，已重建配置、context providers、工具声明和 skill catalog".into(),
+        ));
+        emit(AgentEvent::Notice(format!("Web capability: {web_label}")));
+    }
+
     fn apply_model_selection(
         &mut self,
         selection: ActiveModelSelection,
@@ -261,6 +416,7 @@ impl Agent {
             }
         };
         let next_budget = budget_from_settings(&settings);
+        let web_label = settings.web.label();
         let next_provider = (self.provider_factory)(settings);
         let default_effort = self
             .models
@@ -308,6 +464,7 @@ impl Agent {
             label: label.clone(),
         });
         emit(AgentEvent::Notice(format!("已切换到 {}(历史保留)", label)));
+        emit(AgentEvent::Notice(format!("Web capability: {web_label}")));
     }
 
     /// provider/model/effort 变化是会话事实:恢复会话时可以据此解释历史。

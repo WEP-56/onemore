@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::{
-    optional_u64, require_str, Tool, ToolCapabilities, ToolContext, ToolError, ToolErrorCode,
-    ToolOutput, ToolPermissionSpec, ToolSpec,
+    optional_u64, require_str, CommandSyntax, Tool, ToolCapabilities, ToolContext, ToolError,
+    ToolErrorCode, ToolOutput, ToolPermissionSpec, ToolSpec,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -78,6 +78,14 @@ impl Shell {
             }
             Shell::Cmd => "命令由 cmd.exe 执行:用 batch 语法(&、%VAR%、nul)",
             Shell::Sh => "命令由 /bin/sh 执行,POSIX 语法",
+        }
+    }
+
+    fn command_syntax(&self) -> CommandSyntax {
+        match self {
+            Shell::GitBash(_) | Shell::Sh => CommandSyntax::Posix,
+            Shell::PowerShell => CommandSyntax::PowerShell,
+            Shell::Cmd => CommandSyntax::Cmd,
         }
     }
 }
@@ -150,7 +158,11 @@ impl Tool for RunCommand {
                 "required": ["command"]
             }),
             capabilities: ToolCapabilities::COMMAND,
-            permission: ToolPermissionSpec::opaque_side_effect(&["cwd"]),
+            permission: ToolPermissionSpec::command(
+                "command",
+                Some("cwd"),
+                self.shell.command_syntax(),
+            ),
         }
     }
 

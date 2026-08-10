@@ -34,6 +34,7 @@ use crate::config::{ApiKind, ProviderProfile, ProviderSettings, ReasoningEffortP
 use crate::context::PromptContext;
 use crate::message::{ChatMessage, StopReason, Usage};
 use crate::tools::ToolSpec;
+use crate::web::WebCapabilityBinding;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderCapabilities {
@@ -220,12 +221,31 @@ fn sha256_hex(value: &Value) -> String {
     digest.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_fingerprint(
     profile: ProviderProfile,
     model: &str,
     reasoning_effort: &ReasoningEffortPolicy,
     prompt: &PromptContext,
     tools: &[ToolSpec],
+) -> String {
+    prompt_fingerprint_with_web(
+        profile,
+        model,
+        reasoning_effort,
+        prompt,
+        tools,
+        &WebCapabilityBinding::Disabled,
+    )
+}
+
+pub(crate) fn prompt_fingerprint_with_web(
+    profile: ProviderProfile,
+    model: &str,
+    reasoning_effort: &ReasoningEffortPolicy,
+    prompt: &PromptContext,
+    tools: &[ToolSpec],
+    web: &WebCapabilityBinding,
 ) -> String {
     let semantic_prompt = serde_json::json!({
         "version": 2,
@@ -234,16 +254,34 @@ pub(crate) fn prompt_fingerprint(
         "reasoning_effort": reasoning_effort,
         "system": prompt.system_text(),
         "tools": canonical_tools(tools),
+        "web": web,
         "messages": prompt.messages,
     });
     format!("sha256:{}", sha256_hex(&semantic_prompt))
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_cache_key(
     profile: ProviderProfile,
     model: &str,
     prompt: &PromptContext,
     tools: &[ToolSpec],
+) -> String {
+    prompt_cache_key_with_web(
+        profile,
+        model,
+        prompt,
+        tools,
+        &WebCapabilityBinding::Disabled,
+    )
+}
+
+pub(crate) fn prompt_cache_key_with_web(
+    profile: ProviderProfile,
+    model: &str,
+    prompt: &PromptContext,
+    tools: &[ToolSpec],
+    web: &WebCapabilityBinding,
 ) -> String {
     let stable_prefix = serde_json::json!({
         "version": 1,
@@ -251,6 +289,7 @@ pub(crate) fn prompt_cache_key(
         "model": model,
         "system": prompt.system_text(),
         "tools": canonical_tools(tools),
+        "web": web,
     });
     // OpenAI limits prompt_cache_key to 64 characters. Keep the readable
     // version marker and use 212 bits of the semantic-prefix hash; truncating
@@ -554,6 +593,49 @@ mod tests {
                 "gpt-test",
                 &different_prefix,
                 &tools,
+            )
+        );
+    }
+
+    #[test]
+    fn prompt_identity_changes_with_the_frozen_web_binding() {
+        let prompt = PromptContext::default();
+        let effort = ReasoningEffortPolicy::Send("medium".into());
+        let disabled = WebCapabilityBinding::Disabled;
+        let native = WebCapabilityBinding::OpenAiNative(Default::default());
+
+        assert_ne!(
+            prompt_fingerprint_with_web(
+                ProviderProfile::OpenAiResponses,
+                "gpt-test",
+                &effort,
+                &prompt,
+                &[],
+                &disabled,
+            ),
+            prompt_fingerprint_with_web(
+                ProviderProfile::OpenAiResponses,
+                "gpt-test",
+                &effort,
+                &prompt,
+                &[],
+                &native,
+            )
+        );
+        assert_ne!(
+            prompt_cache_key_with_web(
+                ProviderProfile::OpenAiResponses,
+                "gpt-test",
+                &prompt,
+                &[],
+                &disabled,
+            ),
+            prompt_cache_key_with_web(
+                ProviderProfile::OpenAiResponses,
+                "gpt-test",
+                &prompt,
+                &[],
+                &native,
             )
         );
     }

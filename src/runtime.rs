@@ -81,6 +81,11 @@ pub struct Agent {
     hooks: HookRegistry,
     startup_events: std::collections::VecDeque<AgentEvent>,
     approval_rx: Option<Receiver<ApprovalResponse>>,
+    pub(crate) config_path: Option<std::path::PathBuf>,
+    pub(crate) data_root: Option<std::path::PathBuf>,
+    pub(crate) default_context: bool,
+    pub(crate) default_tools: bool,
+    pub(crate) reloadable_skills: bool,
     /// 活动运行中收到、需要等本轮结束再执行的命令(/clear、/provider 等)。
     deferred: std::collections::VecDeque<AgentCommand>,
 }

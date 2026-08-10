@@ -228,12 +228,13 @@ impl AnthropicProvider {
             headers.push(("anthropic-version", API_VERSION.to_string()));
         }
         let body = self.build_body(prompt, tools);
-        let prompt_fingerprint = super::prompt_fingerprint(
+        let prompt_fingerprint = super::prompt_fingerprint_with_web(
             self.settings.profile,
             &self.settings.model,
             &self.settings.reasoning_effort,
             prompt,
             tools,
+            &self.settings.web,
         );
         let reader = post_sse(&self.agent, &url, &headers, &body)?;
         let mut sse = SseReader::new(reader);
@@ -426,6 +427,7 @@ impl AnthropicProvider {
 mod tests {
     use super::*;
     use crate::config::{ApiKind, ProviderProfile};
+    use crate::web::WebCapabilityBinding;
 
     fn provider() -> AnthropicProvider {
         AnthropicProvider::new(ProviderSettings {
@@ -439,6 +441,7 @@ mod tests {
             context_window: None,
             selected_effort: "medium".into(),
             reasoning_effort: ReasoningEffortPolicy::Omit,
+            web: WebCapabilityBinding::Disabled,
         })
     }
 
