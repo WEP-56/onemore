@@ -1,6 +1,8 @@
 //! Provider-neutral Web capability selection and bounded, normalized citations.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,6 +11,75 @@ use url::Url;
 use crate::config::ProviderProfile;
 use crate::util;
 
+mod brave;
+mod exa;
+mod http_client;
+mod serper;
+mod tavily;
+
+#[cfg(test)]
+mod test_support {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    pub(super) fn serve_json_once(
+        path: &str,
+        response_body: serde_json::Value,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let (header_end, content_length) = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    panic!("test HTTP client closed before finishing request");
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let end = index + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    break (end, length);
+                }
+            };
+            while bytes.len() < header_end + content_length {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            sender.send(String::from_utf8(bytes).unwrap()).unwrap();
+            let body = response_body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        (format!("http://{address}{path}"), receiver)
+    }
+}
+
 const MAX_ALLOWED_DOMAINS: usize = 100;
 const MAX_DOMAIN_LENGTH: usize = 253;
 const MAX_LOCATION_TEXT_CHARS: usize = 100;
@@ -16,6 +87,46 @@ const MAX_TIMEZONE_CHARS: usize = 64;
 const MAX_SOURCES: usize = 20;
 const MAX_URL_CHARS: usize = 2_048;
 const MAX_SOURCE_TITLE_CHARS: usize = 240;
+const MAX_SOURCE_PREVIEW_CHARS: usize = 1_500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchBackendKind {
+    Tavily,
+    Brave,
+    Exa,
+    Serper,
+}
+
+impl WebSearchBackendKind {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "tavily" => Ok(Self::Tavily),
+            "brave" | "brave-search" => Ok(Self::Brave),
+            "exa" => Ok(Self::Exa),
+            "serper" => Ok(Self::Serper),
+            _ => Err("supported backends: tavily | brave | exa | serper".into()),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tavily => "Tavily",
+            Self::Brave => "Brave Search",
+            Self::Exa => "Exa",
+            Self::Serper => "Serper",
+        }
+    }
+
+    pub fn api_key_env(self) -> &'static str {
+        match self {
+            Self::Tavily => "TAVILY_API_KEY",
+            Self::Brave => "BRAVE_SEARCH_API_KEY",
+            Self::Exa => "EXA_API_KEY",
+            Self::Serper => "SERPER_API_KEY",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebMode {
@@ -119,24 +230,40 @@ impl WebMode {
 }
 
 /// The implementation selected once for one Agent/session capability epoch.
-/// It is intentionally not a local `ToolRegistry` entry: hosted tools execute
-/// inside the provider, while a future external binding will be a real local
-/// function tool with its own lifecycle.
+/// Hosted tools execute inside the provider. Harness-owned bindings are turned
+/// into exactly one local `web_search` tool when the capability epoch is built.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebCapabilityBinding {
     OpenAiNative(WebSearchSettings),
+    HarnessFunction {
+        backend: WebSearchBackendKind,
+        settings: WebSearchSettings,
+        api_key_env: String,
+    },
     Disabled,
 }
 
 impl WebCapabilityBinding {
-    pub fn resolve(mode: WebMode, profile: ProviderProfile, settings: WebSearchSettings) -> Self {
+    pub fn resolve(
+        mode: WebMode,
+        profile: ProviderProfile,
+        settings: WebSearchSettings,
+        external_backend: Option<WebSearchBackendKind>,
+    ) -> Self {
         match mode {
-            WebMode::Disabled | WebMode::External => Self::Disabled,
+            WebMode::Disabled => Self::Disabled,
             WebMode::Auto | WebMode::Native if profile == ProviderProfile::OpenAiResponses => {
                 Self::OpenAiNative(settings)
             }
-            WebMode::Auto | WebMode::Native => Self::Disabled,
+            WebMode::Native => Self::Disabled,
+            WebMode::Auto | WebMode::External => external_backend
+                .map(|backend| Self::HarnessFunction {
+                    backend,
+                    settings,
+                    api_key_env: backend.api_key_env().into(),
+                })
+                .unwrap_or(Self::Disabled),
         }
     }
 
@@ -191,9 +318,109 @@ impl WebCapabilityBinding {
                     format!("OpenAI hosted web search ({})", details.join(", "))
                 }
             }
+            Self::HarnessFunction {
+                backend, settings, ..
+            } => {
+                let mut details = Vec::new();
+                if let Some(context_size) = settings.context_size {
+                    details.push(format!("context={context_size:?}").to_ascii_lowercase());
+                }
+                if !settings.allowed_domains.is_empty() {
+                    details.push(format!("domains={}", settings.allowed_domains.len()));
+                }
+                if details.is_empty() {
+                    format!("{} external web search", backend.label())
+                } else {
+                    format!(
+                        "{} external web search ({})",
+                        backend.label(),
+                        details.join(", ")
+                    )
+                }
+            }
             Self::Disabled => "disabled".into(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebSearchRequest {
+    pub query: String,
+    pub settings: WebSearchSettings,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WebSearchResponse {
+    pub backend: WebSearchBackendKind,
+    pub query: String,
+    pub sources: Vec<Source>,
+    pub request_id: Option<String>,
+    pub response_time_seconds: Option<f64>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WebSearchErrorKind {
+    Aborted,
+    Timeout,
+    Network,
+    Http,
+    InvalidResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebSearchError {
+    pub backend: WebSearchBackendKind,
+    pub kind: WebSearchErrorKind,
+    pub message: String,
+    pub retryable: bool,
+    pub status: Option<u16>,
+}
+
+pub(crate) trait WebSearchBackend: Send + Sync {
+    fn kind(&self) -> WebSearchBackendKind;
+    fn search(
+        &self,
+        request: &WebSearchRequest,
+        cancel: &AtomicBool,
+    ) -> Result<WebSearchResponse, WebSearchError>;
+}
+
+pub(crate) fn build_external_backend(
+    binding: &WebCapabilityBinding,
+) -> Result<Option<Arc<dyn WebSearchBackend>>, String> {
+    let WebCapabilityBinding::HarnessFunction {
+        backend,
+        api_key_env,
+        ..
+    } = binding
+    else {
+        return Ok(None);
+    };
+    let api_key = std::env::var(api_key_env)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} external web search requires environment variable {}",
+                backend.label(),
+                api_key_env
+            )
+        })?;
+    let api_key = api_key.trim();
+    if api_key.chars().count() > 512 || api_key.chars().any(char::is_control) {
+        return Err(format!(
+            "{} contains an invalid external web search credential",
+            api_key_env
+        ));
+    }
+    let backend: Arc<dyn WebSearchBackend> = match backend {
+        WebSearchBackendKind::Tavily => Arc::new(tavily::TavilyBackend::new(api_key.into())),
+        WebSearchBackendKind::Brave => Arc::new(brave::BraveBackend::new(api_key.into())),
+        WebSearchBackendKind::Exa => Arc::new(exa::ExaBackend::new(api_key.into())),
+        WebSearchBackendKind::Serper => Arc::new(serper::SerperBackend::new(api_key.into())),
+    };
+    Ok(Some(backend))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,9 +633,25 @@ fn source_kind(url: &str) -> SourceKind {
     }
 }
 
+fn domain_allowed(url: &str, allowed_domains: &[String]) -> bool {
+    if allowed_domains.is_empty() {
+        return true;
+    }
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    allowed_domains
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn auto_resolves_only_the_supported_native_provider() {
@@ -418,6 +661,7 @@ mod tests {
                 WebMode::Auto,
                 ProviderProfile::OpenAiResponses,
                 settings.clone(),
+                Some(WebSearchBackendKind::Tavily),
             ),
             WebCapabilityBinding::OpenAiNative(settings.clone())
         );
@@ -426,6 +670,7 @@ mod tests {
                 WebMode::Auto,
                 ProviderProfile::AnthropicMessages,
                 settings.clone(),
+                None,
             ),
             WebCapabilityBinding::Disabled
         );
@@ -434,6 +679,7 @@ mod tests {
                 WebMode::External,
                 ProviderProfile::OpenAiResponses,
                 settings,
+                None,
             ),
             WebCapabilityBinding::Disabled
         );
@@ -456,6 +702,7 @@ mod tests {
             WebMode::Native,
             ProviderProfile::OpenAiResponses,
             settings,
+            None,
         )
         .openai_native_tool()
         .unwrap();
@@ -466,6 +713,85 @@ mod tests {
             json!(["example.com", "docs.example.com"])
         );
         assert_eq!(tool["user_location"]["country"], "US");
+    }
+
+    #[test]
+    fn external_binding_is_selected_once_and_keeps_secret_out_of_identity() {
+        let binding = WebCapabilityBinding::resolve(
+            WebMode::Auto,
+            ProviderProfile::AnthropicMessages,
+            WebSearchSettings::default(),
+            Some(WebSearchBackendKind::Tavily),
+        );
+        assert_eq!(binding.label(), "Tavily external web search");
+        let serialized = serde_json::to_string(&binding).unwrap();
+        assert!(serialized.contains("TAVILY_API_KEY"));
+        assert!(!serialized.contains("secret-value"));
+        assert_eq!(binding, binding.clone());
+    }
+
+    #[test]
+    fn all_supported_external_backends_have_stable_names_and_key_sources() {
+        let backends = [
+            (WebSearchBackendKind::Tavily, "tavily", "TAVILY_API_KEY"),
+            (WebSearchBackendKind::Brave, "brave", "BRAVE_SEARCH_API_KEY"),
+            (WebSearchBackendKind::Exa, "exa", "EXA_API_KEY"),
+            (WebSearchBackendKind::Serper, "serper", "SERPER_API_KEY"),
+        ];
+        for (kind, configured_name, key_env) in backends {
+            assert_eq!(WebSearchBackendKind::parse(configured_name), Ok(kind));
+            assert_eq!(kind.api_key_env(), key_env);
+        }
+    }
+
+    #[test]
+    fn live_external_backends_when_enabled() {
+        if std::env::var("ONEMORE_LIVE_WEB_SMOKE").as_deref() != Ok("1") {
+            return;
+        }
+        let cancel = AtomicBool::new(false);
+        for kind in [
+            WebSearchBackendKind::Tavily,
+            WebSearchBackendKind::Exa,
+            WebSearchBackendKind::Serper,
+        ] {
+            if std::env::var(kind.api_key_env())
+                .ok()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                continue;
+            }
+            let settings = WebSearchSettings {
+                context_size: Some(WebSearchContextSize::Low),
+                allowed_domains: Vec::new(),
+                location: None,
+            };
+            let binding = WebCapabilityBinding::HarnessFunction {
+                backend: kind,
+                settings: settings.clone(),
+                api_key_env: kind.api_key_env().into(),
+            };
+            let backend = build_external_backend(&binding)
+                .unwrap()
+                .expect("live binding should create a backend");
+            let response = backend
+                .search(
+                    &WebSearchRequest {
+                        query: "Rust programming language official website".into(),
+                        settings,
+                    },
+                    &cancel,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{} live smoke failed: {}", kind.label(), error.message)
+                });
+            assert_eq!(response.backend, kind);
+            assert!(
+                !response.sources.is_empty(),
+                "{} returned no sources",
+                kind.label()
+            );
+        }
     }
 
     #[test]

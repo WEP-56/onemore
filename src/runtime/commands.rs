@@ -19,7 +19,10 @@ use super::inbox::CommandInbox;
 use super::{budget_from_settings, Agent, AgentBuilder};
 use crate::skills::discover;
 use crate::storage::AppPaths;
-use crate::tools::{default_registry, default_registry_without_skills, detect_shell};
+use crate::tools::{
+    default_registry_with_web, default_registry_without_skills_with_web, detect_shell,
+    web_search_from_binding,
+};
 
 pub(super) struct HandleReport {
     pub keep_running: bool,
@@ -365,6 +368,37 @@ impl Agent {
         };
         let budget = budget_from_settings(&settings);
         let web_label = settings.web.label();
+        let reloaded_tools = if self.default_tools {
+            let registry = match &skills {
+                Some(catalog) => default_registry_with_web(
+                    shell.clone(),
+                    std::sync::Arc::clone(catalog),
+                    &settings.web,
+                ),
+                None => default_registry_without_skills_with_web(shell.clone(), &settings.web),
+            };
+            match registry {
+                Ok(registry) => Some(registry),
+                Err(error) => {
+                    emit(AgentEvent::Error(format!(
+                        "reload 构造 Web 工具失败: {error}"
+                    )));
+                    return;
+                }
+            }
+        } else {
+            if matches!(
+                &settings.web,
+                crate::web::WebCapabilityBinding::HarnessFunction { .. }
+            ) && !self.tools.contains("web_search")
+            {
+                emit(AgentEvent::Error(
+                    "reload 后的外部 Web binding 需要 host-owned registry 提供 web_search".into(),
+                ));
+                return;
+            }
+            None
+        };
         let provider = (self.provider_factory)(settings);
         if let Err(error) = compaction_settings.validate() {
             emit(AgentEvent::Error(format!("reload 压缩配置失败: {error:#}")));
@@ -374,11 +408,8 @@ impl Agent {
         if let Some(context) = extra_context {
             self.extra_context = context;
         }
-        if self.default_tools {
-            self.tools = match &skills {
-                Some(catalog) => default_registry(shell, std::sync::Arc::clone(catalog)),
-                None => default_registry_without_skills(shell),
-            };
+        if let Some(tools) = reloaded_tools {
+            self.tools = tools;
         }
         self.models = models;
         self.provider = provider;
@@ -417,6 +448,29 @@ impl Agent {
         };
         let next_budget = budget_from_settings(&settings);
         let web_label = settings.web.label();
+        let next_web_search = if self.default_tools {
+            match web_search_from_binding(&settings.web) {
+                Ok(tool) => tool,
+                Err(error) => {
+                    emit(AgentEvent::Error(format!(
+                        "切换失败，无法构造 Web 工具: {error}"
+                    )));
+                    return;
+                }
+            }
+        } else {
+            if matches!(
+                &settings.web,
+                crate::web::WebCapabilityBinding::HarnessFunction { .. }
+            ) && !self.tools.contains("web_search")
+            {
+                emit(AgentEvent::Error(
+                    "切换失败：外部 Web binding 需要 host-owned registry 提供 web_search".into(),
+                ));
+                return;
+            }
+            None
+        };
         let next_provider = (self.provider_factory)(settings);
         let default_effort = self
             .models
@@ -454,6 +508,9 @@ impl Agent {
             return;
         }
         self.provider = next_provider;
+        if self.default_tools {
+            self.tools.replace_web_search(next_web_search);
+        }
         self.budget = next_budget;
         self.active_selection = selection.clone();
         let label = self.provider.label();

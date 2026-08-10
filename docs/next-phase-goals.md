@@ -62,11 +62,11 @@ enum WebCapabilityBinding {
 - OpenAI Responses 原生支持时，provider adapter 注册 `{ "type": "web_search" }`，搜索由 OpenAI 执行。
 - Anthropic Messages 原生支持时，provider adapter 注册版本化 server tool，搜索由 Anthropic 执行。
 - DeepSeek、xAI 等 provider 原生支持时，使用各自 adapter 和能力声明，不按相同工具名假设协议完全兼容。
-- 模型支持 function calling、但没有原生搜索时，向模型暴露 Onemore 的 `web_search` / `web_fetch`，由 harness 调用 Tavily、Brave 等外部服务。
+- 模型支持 function calling、但没有原生搜索时，向模型暴露 Onemore 的 `web_search` / `web_fetch`，由 harness 调用 Tavily、Brave Search、Exa、Serper 等外部服务。
 - 模型支持工具但选择能力较弱时，可以在确定需要联网的调用中使用强制 tool choice。
 - 完全不支持结构化工具调用的旧模型无法“强制 tool”；只能由 harness preflight 搜索并把受控结果注入上下文，或明确禁用网络能力。
 
-外部搜索服务按执行所有权归类，而不是按算法归类。Tavily、Brave、Exa 即使使用不同的传统、语义或 AI 搜索算法，从 Onemore 角度仍然都是 harness-owned HTTP backend。
+外部搜索服务按执行所有权归类，而不是按算法归类。Tavily、Brave Search、Exa、Serper 即使使用不同的传统、语义或 AI 搜索算法，从 Onemore 角度仍然都是 harness-owned HTTP backend。
 
 native provider tool 不进入普通 `ToolRegistry`，否则 runtime 会误以为需要本地执行。resolver 应在 session 建立时解析一次，并固定本 session 的 binding，不在运行时错误后静默切换 backend 或工具语义，以保持行为、引用和 prompt cache 前缀稳定。
 
@@ -109,16 +109,16 @@ SDK/TUI 只消费 `CapabilityStarted`、`SourcesUpdated`、`CapabilityFinished` 
 后续实施顺序：
 
 1. 先建立 `WebCapability`、resolver、统一 source/citation 和 backend trait。
-2. 第一版实现 Tavily、Brave 两个 `HarnessFunction` backend；同一时刻只向模型暴露一个选定实现。
+2. 第一版实现 Tavily、Brave Search、Exa、Serper 四个 `HarnessFunction` backend；同一时刻只向模型暴露一个选定实现。
 3. 再增加 OpenAI Responses、Anthropic Messages、DeepSeek 和 xAI 的 native binding。
-4. 最后评估 Exa、通用 `web_fetch`、抓取缓存和浏览器降级。
+4. 最后评估通用 `web_fetch`、抓取缓存和浏览器降级。
 
 建议配置形态：
 
 ```toml
 [web]
 mode = "auto" # auto | native | external | disabled
-external_backends = ["tavily", "brave"]
+external_backends = ["tavily", "brave", "exa", "serper"]
 ```
 
 `auto` 必须产生可观察、确定的选择结果；启动事件和 TUI 应显示当前 Web backend。runtime 失败时报告失败，不在同一 session 内静默切换 backend。
@@ -446,7 +446,8 @@ Skill instructions loaded on demand.
 - 增加结构化测试/编译诊断结果
 - 补充工具契约和长任务集成测试
 - 用真实 provider 记录验证 usage、自动压缩和 retry 展示
-- 确认下一阶段按既定 Web Capability Provider 设计进入 Tavily/Brave 实现
+- Web Capability Provider 的 Tavily、Brave Search、Exa、Serper HarnessFunction backend 已完成；
+  下一步进入稳定 SDK/RPC source 事件与 DTO 设计
 - 再评估工作区搜索和浏览器工具的优先级
 
 ## 六、阶段验收标准

@@ -3,7 +3,7 @@ use super::{
     ReasoningEffortPolicy, EXAMPLE_CONFIG,
 };
 use crate::permission::PermissionRule;
-use crate::web::WebCapabilityBinding;
+use crate::web::{WebCapabilityBinding, WebSearchBackendKind};
 use std::time::Duration;
 
 fn load_config(text: &str) -> anyhow::Result<Config> {
@@ -137,6 +137,7 @@ model = "model"
     for (setting, expected) in [
         ("mode = \"unsupported\"", "[web].mode"),
         ("context_size = \"huge\"", "context_size"),
+        ("external_backends = [\"unknown\"]", "supported backends"),
         (
             "allowed_domains = [\"https://example.com\"]",
             "allowed_domains",
@@ -146,6 +147,34 @@ model = "model"
         let error = load_config(&base.replace("WEB_SETTING", setting)).unwrap_err();
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
+}
+
+#[test]
+fn external_web_backend_names_are_normalized_to_supported_kinds() {
+    let config = load_config(
+        r#"
+[agent]
+provider = "mock"
+[web]
+external_backends = ["TAVILY", "brave-search", "exa", "serper"]
+[providers.mock]
+api = "responses"
+profile = "openai"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.external_web_backends,
+        [
+            WebSearchBackendKind::Tavily,
+            WebSearchBackendKind::Brave,
+            WebSearchBackendKind::Exa,
+            WebSearchBackendKind::Serper,
+        ]
+    );
 }
 
 #[test]

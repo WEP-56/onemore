@@ -34,11 +34,16 @@ outside_workspace = "ask"
 commands = "ask"
 
 # ---- Hosted web search ----
-# auto enables OpenAI Responses hosted web search when the selected provider supports it.
-# native requests the provider-hosted implementation; external is reserved for a future local backend;
-# disabled turns web search off. The binding is frozen until the next /reload or model selection.
+# auto enables OpenAI Responses hosted web search when the selected provider supports it;
+# otherwise it uses the first configured external backend with a non-empty credential.
+# native only requests provider-hosted search. external requires a configured backend and credential;
+# disabled turns web search off.
+# The binding is frozen until the next /reload or model selection.
 [web]
 mode = "auto"
+# External backend preference order. Credentials: TAVILY_API_KEY, BRAVE_SEARCH_API_KEY,
+# EXA_API_KEY, and SERPER_API_KEY. Only the first available backend is bound per epoch.
+# external_backends = ["tavily", "brave", "exa", "serper"]
 # Optional provider hints: low | medium | high. Omit to let the provider choose.
 # context_size = "medium"
 # Optional exact domain allowlist, normalized to lowercase (at most 100 entries).

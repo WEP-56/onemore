@@ -11,8 +11,8 @@
 2. Skills 迁移到 `.agents/skills` 并实现 `/reload`，不考虑旧配置或旧目录迁移。
 3. 工作区工具与 Web 工具。
 
-以上三项目前均已完成可交付实现。Web 的外部 Tavily/Brave backend 和 Web 专用 RPC DTO
-仍是后续任务。用户明确允许 RPC 层先只写 TODO，暂不实现协议。
+以上三项目前均已完成可交付实现。Web 的外部 Tavily、Brave Search、Exa、Serper backend
+也已接入；Web 专用 RPC DTO 仍是后续任务。用户明确允许 RPC 层先只写 TODO，暂不实现协议。
 
 其他明确决定：
 
@@ -142,11 +142,14 @@
 - OpenAI `url_citation` 被投影为 provider-neutral `Source`：只接受有界 HTTP(S) URL，去除 URL
   credentials 与 fragment，清洗/压平/截断标题，URL 去重，最多 20 个 source。
 - Agent 启动、`/reload` 和 provider/model 切换均发出当前 Web capability Notice。
+- `external_backends` 固定支持 `tavily | brave | exa | serper`，按配置顺序选择首个有凭据的 backend。
+- 密钥只从 `TAVILY_API_KEY`、`BRAVE_SEARCH_API_KEY`、`EXA_API_KEY`、`SERPER_API_KEY` 读取，
+  在 capability epoch 构建时冻结，不进入 prompt identity、工具输出或持久化事实。
+- harness-owned `web_search` 复用普通工具生命周期、强制审批、取消、超时、清洗和有界输出；
+  runtime error 不会触发 session 内 backend 切换。
 
 尚未实现：
 
-- `external` 当前确定性解析为 disabled，不会在 session 内静默切换 backend。
-- `external_backends` 目前只做名称校验，尚未绑定 Tavily/Brave。
 - Anthropic/DeepSeek/xAI native Web adapters。
 - Web started/completed/failed、sources/provenance 的稳定 SDK/RPC DTO 与一等持久化。
 - 通用 `web_fetch`、抓取缓存和浏览器控制。
@@ -172,7 +175,7 @@ RPC 延期项已记录在 `docs/workspace-and-web-tools.md`。在用户改变决
 
 2026-08-10 的最终完整回归已通过：
 
-- 234 个 unit tests。
+- 255 个 unit tests。
 - 1 个 RPC subprocess test。
 - 8 个 provider wire tests。
 - 0 failed、0 ignored。
@@ -194,8 +197,8 @@ GUI approval 阶段曾通过 `npm run build`；最后这轮 Workspace/Web 修改
 ## 下一会话建议顺序
 
 1. 先读本文、`docs/workspace-and-web-tools.md` 和 `docs/next-phase-goals.md`。
-2. 如继续 Web，优先设计并实现 `HarnessFunction` backend trait 与 Tavily/Brave 其中一个 backend；
-   binding 必须在 session 建立时冻结，并复用现有清洗、权限、超时和引用模型。
+2. 外部 `HarnessFunction` trait 与四家 backend 已完成；如继续 Web，优先定义稳定 SDK/TUI source
+   事件，或实现 Anthropic/DeepSeek/xAI native adapter。
 3. 不要提前实现 Web RPC DTO；用户已同意该层只保留 TODO。
 4. 原路线图仍未完成的主要工具能力包括：结构化 patch/edit、长进程生命周期、结构化诊断结果，
    以及 TUI 的工具详情/固定计划/retry/compaction 可观察性。开始其中任何一项前先与用户确认优先级。

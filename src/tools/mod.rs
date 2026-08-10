@@ -21,6 +21,7 @@ mod read_file;
 mod run_command;
 mod search;
 mod update_plan;
+mod web_search;
 mod workspace_walk;
 mod write_file;
 
@@ -343,6 +344,20 @@ impl ToolRegistry {
         self.tools.iter().map(|tool| tool.spec()).collect()
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.iter().any(|tool| tool.spec().name == name)
+    }
+
+    pub(crate) fn replace_web_search(&mut self, tool: Option<Box<dyn Tool>>) {
+        self.tools
+            .retain(|existing| existing.spec().name != "web_search");
+        if let Some(tool) = tool {
+            debug_assert_eq!(tool.spec().name, "web_search");
+            self.tools.push(tool);
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub fn prepare(&self, name: &str, args: &Value) -> Result<PreparedToolCall, ToolError> {
         let Some((tool_index, tool)) = self
             .tools
@@ -557,8 +572,34 @@ pub fn default_registry(
     ToolRegistry::new(tools)
 }
 
-pub(crate) fn default_registry_without_skills(shell: Shell) -> ToolRegistry {
-    ToolRegistry::new(default_tools(shell))
+pub(crate) fn default_registry_with_web(
+    shell: Shell,
+    skills: std::sync::Arc<crate::skills::SkillCatalog>,
+    web: &crate::web::WebCapabilityBinding,
+) -> Result<ToolRegistry, String> {
+    let mut tools = default_tools(shell);
+    tools.push(Box::new(load_skill::LoadSkill::new(skills)));
+    if let Some(web_search) = web_search::from_binding(web)? {
+        tools.push(web_search);
+    }
+    Ok(ToolRegistry::new(tools))
+}
+
+pub(crate) fn default_registry_without_skills_with_web(
+    shell: Shell,
+    web: &crate::web::WebCapabilityBinding,
+) -> Result<ToolRegistry, String> {
+    let mut tools = default_tools(shell);
+    if let Some(web_search) = web_search::from_binding(web)? {
+        tools.push(web_search);
+    }
+    Ok(ToolRegistry::new(tools))
+}
+
+pub(crate) fn web_search_from_binding(
+    web: &crate::web::WebCapabilityBinding,
+) -> Result<Option<Box<dyn Tool>>, String> {
+    web_search::from_binding(web)
 }
 
 fn default_tools(shell: Shell) -> Vec<Box<dyn Tool>> {
@@ -862,5 +903,37 @@ mod tests {
             updates[0].details,
             Some(serde_json::json!({ "completed": 1 }))
         );
+    }
+
+    #[test]
+    fn replacing_a_frozen_web_tool_invalidates_old_prepared_calls() {
+        let mut registry = ToolRegistry::new(vec![Box::new(TypedTestTool {
+            name: "web_search".into(),
+            fail: false,
+        })]);
+        let prepared = registry
+            .prepare("web_search", &serde_json::json!({}))
+            .unwrap();
+        registry.replace_web_search(Some(Box::new(TypedTestTool {
+            name: "web_search".into(),
+            fail: false,
+        })));
+        assert_eq!(
+            registry
+                .specs()
+                .iter()
+                .filter(|spec| spec.name == "web_search")
+                .count(),
+            1
+        );
+        let workspace = Workspace::new(PathBuf::from("."));
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_| {};
+        let outcome =
+            registry.execute_prepared(&prepared, &mut context(&workspace, &cancel, &mut progress));
+        assert_eq!(outcome.error.unwrap().code, ToolErrorCode::Conflict);
+
+        registry.replace_web_search(None);
+        assert!(!registry.contains("web_search"));
     }
 }

@@ -19,7 +19,9 @@ use crate::permission::{PermissionManager, PermissionRules};
 use crate::provider::{build_provider, Provider};
 use crate::skills::{discover, SkillCatalog};
 use crate::storage::{AppPaths, SessionManager, WorkspacePreferences};
-use crate::tools::{default_registry, default_registry_without_skills, detect_shell, ToolRegistry};
+use crate::tools::{
+    default_registry_with_web, default_registry_without_skills_with_web, detect_shell, ToolRegistry,
+};
 use crate::workspace::Workspace;
 
 use super::{budget_from_settings, Agent, RetryPolicy};
@@ -327,6 +329,27 @@ impl AgentBuilder {
         let settings = self.models.resolve_selection(&active_selection)?;
         let budget = budget_from_settings(&settings);
         let web_label = settings.web.label();
+        let tools = match self.tools {
+            Some(tools) => {
+                if matches!(
+                    &settings.web,
+                    crate::web::WebCapabilityBinding::HarnessFunction { .. }
+                ) && !tools.contains("web_search")
+                {
+                    anyhow::bail!(
+                        "a HarnessFunction Web binding requires web_search in a host-owned tool registry"
+                    );
+                }
+                tools
+            }
+            None => match &skills {
+                Some(catalog) => {
+                    default_registry_with_web(shell.clone(), Arc::clone(catalog), &settings.web)
+                }
+                None => default_registry_without_skills_with_web(shell.clone(), &settings.web),
+            }
+            .map_err(anyhow::Error::msg)?,
+        };
         let provider = (self.provider_factory)(settings);
         let sessions: Box<dyn SessionBackend> = match self.session_backend {
             Some(backend) => backend,
@@ -357,10 +380,7 @@ impl AgentBuilder {
 
         Ok(Agent {
             workspace: self.workspace,
-            tools: self.tools.unwrap_or_else(|| match &skills {
-                Some(catalog) => default_registry(shell, Arc::clone(catalog)),
-                None => default_registry_without_skills(shell),
-            }),
+            tools,
             entries: Vec::new(),
             extra_context,
             provider,

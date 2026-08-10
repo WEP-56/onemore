@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::compaction::{CompactionSettings, DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS};
 use crate::harness::ModelRegistry;
 use crate::permission::{PermissionRule, PermissionRules};
-use crate::web::{WebCapabilityBinding, WebMode, WebSearchLocation, WebSearchSettings};
+use crate::web::{
+    WebCapabilityBinding, WebMode, WebSearchBackendKind, WebSearchLocation, WebSearchSettings,
+};
 
 /// 两类接口。字符串来自 config 的 `api = "..."`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +144,8 @@ pub struct ProviderSettings {
     pub context_window: Option<u64>,
     pub selected_effort: String,
     pub reasoning_effort: ReasoningEffortPolicy,
-    /// Frozen at provider construction. Hosted Web capabilities are not local
-    /// function tools and must not be silently replaced mid-session.
+    /// Frozen at provider construction. Hosted tools remain provider-owned;
+    /// harness-owned bindings create one matching local tool for the epoch.
     pub web: WebCapabilityBinding,
 }
 
@@ -358,6 +360,7 @@ pub struct Config {
     pub permission_rules: PermissionRules,
     web_mode: WebMode,
     web_search: WebSearchSettings,
+    external_web_backends: Vec<WebSearchBackendKind>,
     providers: BTreeMap<String, ProviderSection>,
 }
 
@@ -477,16 +480,20 @@ impl Config {
                     backend
                 );
             }
-            if external_web_backends
-                .iter()
-                .any(|existing| existing == &backend)
-            {
+            let kind = WebSearchBackendKind::parse(&backend).map_err(|error| {
+                anyhow!(
+                    "[web].external_backends contains unsupported backend {:?}; {}",
+                    backend,
+                    error
+                )
+            })?;
+            if external_web_backends.contains(&kind) {
                 bail!(
                     "[web].external_backends contains duplicate backend {:?}",
                     backend
                 );
             }
-            external_web_backends.push(backend);
+            external_web_backends.push(kind);
         }
         let web_search = WebSearchSettings::new(
             context_size.as_deref(),
@@ -515,6 +522,7 @@ impl Config {
             permission_rules,
             web_mode,
             web_search,
+            external_web_backends,
             providers,
         })
     }
@@ -601,6 +609,7 @@ impl Config {
                 })?
             }
         };
+        let external_backend = self.resolve_external_web_backend(sec.profile)?;
         Ok(ProviderSettings {
             name: selection.provider.clone(),
             api: sec.api,
@@ -612,8 +621,51 @@ impl Config {
             context_window: model.context_window,
             selected_effort: selection.effort.clone(),
             reasoning_effort,
-            web: WebCapabilityBinding::resolve(self.web_mode, sec.profile, self.web_search.clone()),
+            web: WebCapabilityBinding::resolve(
+                self.web_mode,
+                sec.profile,
+                self.web_search.clone(),
+                external_backend,
+            ),
         })
+    }
+
+    fn resolve_external_web_backend(
+        &self,
+        profile: ProviderProfile,
+    ) -> Result<Option<WebSearchBackendKind>> {
+        let needs_external = match self.web_mode {
+            WebMode::External => true,
+            WebMode::Auto => profile != ProviderProfile::OpenAiResponses,
+            WebMode::Native | WebMode::Disabled => false,
+        };
+        if !needs_external {
+            return Ok(None);
+        }
+        for backend in &self.external_web_backends {
+            if std::env::var(backend.api_key_env())
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                return Ok(Some(*backend));
+            }
+        }
+        if self.web_mode == WebMode::External {
+            if self.external_web_backends.is_empty() {
+                bail!(
+                    "[web].mode = \"external\" requires at least one supported external_backends entry"
+                );
+            }
+            bail!(
+                "no configured external Web backend has credentials; set one of: {}",
+                self.external_web_backends
+                    .iter()
+                    .map(|backend| backend.api_key_env())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(None)
     }
 
     pub fn validate_selection(&self, selection: &ActiveModelSelection) -> Result<()> {
@@ -965,11 +1017,16 @@ outside_workspace = "ask"
 commands = "ask"
 
 # ---- Hosted web search ----
-# auto enables OpenAI Responses hosted web search when the selected provider supports it.
-# native requests the provider-hosted implementation; external is reserved for a future local backend;
-# disabled turns web search off. The binding is frozen until the next /reload or model selection.
+# auto enables OpenAI Responses hosted web search when the selected provider supports it;
+# otherwise it uses the first configured external backend with a non-empty credential.
+# native only requests provider-hosted search. external requires a configured backend and credential;
+# disabled turns web search off.
+# The binding is frozen until the next /reload or model selection.
 [web]
 mode = "auto"
+# External backend preference order. Credentials: TAVILY_API_KEY, BRAVE_SEARCH_API_KEY,
+# EXA_API_KEY, and SERPER_API_KEY. Only the first available backend is bound per epoch.
+# external_backends = ["tavily", "brave", "exa", "serper"]
 # Optional provider hints: low | medium | high. Omit to let the provider choose.
 # context_size = "medium"
 # Optional exact domain allowlist, normalized to lowercase (at most 100 entries).
