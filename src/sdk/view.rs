@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ActiveModelSelection, ProviderCatalogEntry};
+use crate::event::CompactionTrigger;
 use crate::message::{Block, Role, Usage};
 use crate::permission::{ApprovalRequest, ApprovalScope};
 use crate::plan::{reduce_plan, PlanSnapshot, PlanStatus};
@@ -62,6 +63,13 @@ pub enum SessionPhase {
     ShuttingDown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTriggerView {
+    Automatic,
+    Manual,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
@@ -115,6 +123,26 @@ pub struct QueueView {
 pub struct QueuedInputView {
     pub command_id: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolMetadataView {
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputView {
+    /// Bounded, sanitized content returned to the model.
+    pub content: String,
+    /// Compact human-readable status used by collapsed tool rows.
+    pub summary: String,
+    /// Allowlisted display metadata. Arbitrary tool `details` are never exposed.
+    pub metadata: ToolMetadataView,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +335,26 @@ pub enum ProgressEvent {
         attempt: u32,
         max_retries: u32,
     },
+    CompactionStarted {
+        compaction_id: String,
+        trigger: CompactionTriggerView,
+        estimated_tokens: u64,
+        available_tokens: Option<u64>,
+    },
+    CompactionFinished {
+        compaction_id: String,
+        trigger: CompactionTriggerView,
+        tokens_before: u64,
+        summary_chars: usize,
+        retained_messages: usize,
+    },
+    CompactionFailed {
+        compaction_id: String,
+        trigger: CompactionTriggerView,
+        error: String,
+        cancelled: bool,
+        history_changed: bool,
+    },
     AssistantDelta {
         message_id: String,
         content_index: usize,
@@ -328,12 +376,12 @@ pub enum ProgressEvent {
     ToolUpdated {
         tool_call_id: String,
         name: String,
-        output: String,
+        output: ToolOutputView,
     },
     ToolFinished {
         tool_call_id: String,
         name: String,
-        output: String,
+        output: ToolOutputView,
         error: Option<CommandErrorView>,
     },
     ApprovalRequested {
@@ -368,6 +416,15 @@ pub enum ProgressEvent {
         current_id: String,
         sessions: Vec<SessionSummaryView>,
     },
+}
+
+impl From<CompactionTrigger> for CompactionTriggerView {
+    fn from(trigger: CompactionTrigger) -> Self {
+        match trigger {
+            CompactionTrigger::Automatic => CompactionTriggerView::Automatic,
+            CompactionTrigger::Manual => CompactionTriggerView::Manual,
+        }
+    }
 }
 
 pub(crate) struct SnapshotSource<'a> {
@@ -551,6 +608,34 @@ impl From<Usage> for UsageView {
     }
 }
 
+impl From<&crate::tools::ToolOutput> for ToolOutputView {
+    fn from(output: &crate::tools::ToolOutput) -> Self {
+        let details = output.details.as_ref();
+        let metadata = ToolMetadataView {
+            command: details
+                .and_then(|value| value.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            cwd: details
+                .and_then(|value| value.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            elapsed_ms: details
+                .and_then(|value| value.get("elapsed_ms"))
+                .and_then(serde_json::Value::as_u64),
+            exit_code: details
+                .and_then(|value| value.get("exit_code"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+        };
+        ToolOutputView {
+            content: output.model_text.clone(),
+            summary: output.ui_text().to_string(),
+            metadata,
+        }
+    }
+}
+
 impl From<PlanSnapshot> for PlanView {
     fn from(plan: PlanSnapshot) -> Self {
         PlanView {
@@ -709,6 +794,71 @@ mod tests {
             snapshot.transcript.as_slice(),
             [TranscriptItem::Notice { text, .. }] if text == "durable notice"
         ));
+    }
+
+    #[test]
+    fn compaction_progress_has_stable_tagged_wire_shape() {
+        let progress = ProgressEvent::CompactionStarted {
+            compaction_id: "compact-1".into(),
+            trigger: CompactionTriggerView::Automatic,
+            estimated_tokens: 128_000,
+            available_tokens: Some(151_000),
+        };
+        let value = serde_json::to_value(&progress).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "compaction_started",
+                "compaction_id": "compact-1",
+                "trigger": "automatic",
+                "estimated_tokens": 128_000,
+                "available_tokens": 151_000
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ProgressEvent>(value).unwrap(),
+            progress
+        );
+    }
+
+    #[test]
+    fn tool_output_view_exposes_only_allowlisted_display_metadata() {
+        let output = crate::tools::ToolOutput {
+            model_text: "full output".into(),
+            ui_summary: Some("command succeeded".into()),
+            details: Some(json!({
+                "command": "cargo test",
+                "cwd": "workspace",
+                "elapsed_ms": 1250,
+                "exit_code": 0,
+                "secret": "must-not-cross-sdk"
+            })),
+        };
+
+        let view = ToolOutputView::from(&output);
+        let encoded = serde_json::to_string(&view).unwrap();
+        assert_eq!(view.content, "full output");
+        assert_eq!(view.summary, "command succeeded");
+        assert_eq!(view.metadata.command.as_deref(), Some("cargo test"));
+        assert_eq!(view.metadata.cwd.as_deref(), Some("workspace"));
+        assert_eq!(view.metadata.elapsed_ms, Some(1250));
+        assert_eq!(view.metadata.exit_code, Some(0));
+        assert!(!encoded.contains("must-not-cross-sdk"));
+        assert!(!encoded.contains("secret"));
+
+        let strict_error = serde_json::from_value::<ToolOutputView>(json!({
+            "content": "full output",
+            "summary": "done",
+            "metadata": {
+                "command": null,
+                "cwd": null,
+                "elapsed_ms": null,
+                "exit_code": null,
+                "secret": true
+            }
+        }))
+        .unwrap_err();
+        assert!(strict_error.to_string().contains("unknown field"));
     }
 
     #[test]

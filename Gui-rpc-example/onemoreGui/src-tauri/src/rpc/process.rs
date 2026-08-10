@@ -86,7 +86,7 @@ pub fn spawn_rpc(app: AppHandle, options: StartOptions) -> Result<RpcHandle, Gui
     });
 
     tx_frame
-        .send("{\"type\":\"hello\",\"version\":1}".to_string())
+        .send("{\"type\":\"hello\",\"version\":3}".to_string())
         .map_err(|_| GuiError::new("io_error", "writer 已退出，无法发送 hello"))?;
 
     Ok(RpcHandle {
@@ -258,7 +258,7 @@ fn handle_frame(
             server,
             snapshot,
         } => {
-            if version != 1 {
+            if version != 3 {
                 return Err((
                     "version_mismatch".into(),
                     format!("unsupported protocol version {version}"),

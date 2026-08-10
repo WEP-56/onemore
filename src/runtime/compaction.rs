@@ -6,7 +6,7 @@ use crate::agent_loop::{call_model, ModelCallResult, RetryPolicy};
 use crate::compaction::{prepare_compaction, CompactionPreparation, CompactionSettings};
 use crate::context::budget::{estimate_tokens, ContextBudget};
 use crate::context::PromptContext;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, CompactionTrigger};
 use crate::harness::SessionBackend;
 use crate::message::{Block, ChatMessage, Role, Usage};
 use crate::plan::{compaction_summary as plan_compaction_summary, reduce_plan};
@@ -24,11 +24,7 @@ const COMPACTION_SYSTEM_PROMPT: &str = "你是会话压缩器。把给出的完�
 
 pub(super) enum CompactionOutcome {
     NothingToCompact,
-    Committed {
-        tokens_before: u64,
-        summary_chars: usize,
-        retained_messages: usize,
-    },
+    Committed,
     Cancelled,
     Failed(String),
 }
@@ -81,22 +77,16 @@ impl<'a> CompactionRuntime<'a> {
         let Some(prepared) = self.prepare(&projection, false) else {
             return Ok(None);
         };
-        emit(AgentEvent::Notice(format!(
-            "上下文估算约 {estimated_tokens} tokens,已达到自动压缩阈值"
-        )));
-        match self.compact_prepared(projection, prepared, emit, cancel) {
+        match self.compact_prepared(
+            projection,
+            prepared,
+            CompactionTrigger::Automatic,
+            estimated_tokens,
+            emit,
+            cancel,
+        ) {
             CompactionOutcome::NothingToCompact => Ok(None),
-            CompactionOutcome::Committed {
-                tokens_before,
-                summary_chars,
-                retained_messages,
-            } => {
-                emit(AgentEvent::Notice(format!(
-                    "已自动压缩历史:压缩前约 {tokens_before} tokens,摘要 {summary_chars} 字符,\
-                     保留 {retained_messages} 条最近消息"
-                )));
-                Ok(Some(project_model_messages(self.entries)))
-            }
+            CompactionOutcome::Committed => Ok(Some(project_model_messages(self.entries))),
             CompactionOutcome::Cancelled => {
                 cancel.store(true, Ordering::Relaxed);
                 anyhow::bail!("自动压缩已取消,历史未变化")
@@ -116,7 +106,15 @@ impl<'a> CompactionRuntime<'a> {
         let Some(prepared) = self.prepare(&projection, true) else {
             return CompactionOutcome::NothingToCompact;
         };
-        self.compact_prepared(projection, prepared, emit, cancel)
+        let estimated_tokens = estimate_tokens(0, 0, &projection);
+        self.compact_prepared(
+            projection,
+            prepared,
+            CompactionTrigger::Manual,
+            estimated_tokens,
+            emit,
+            cancel,
+        )
     }
 
     fn prepare(
@@ -138,6 +136,8 @@ impl<'a> CompactionRuntime<'a> {
         &mut self,
         projection: crate::session::ModelProjection,
         prepared: CompactionPreparation,
+        trigger: CompactionTrigger,
+        estimated_tokens: u64,
         emit: &mut dyn FnMut(AgentEvent),
         cancel: &AtomicBool,
     ) -> CompactionOutcome {
@@ -147,6 +147,13 @@ impl<'a> CompactionRuntime<'a> {
         }
 
         let tokens_before = estimate_tokens(0, 0, &projection);
+        let id = uuid::Uuid::new_v4().to_string();
+        emit(AgentEvent::CompactionStarted {
+            id: id.clone(),
+            trigger,
+            estimated_tokens,
+            available_tokens: self.budget.available_input(),
+        });
         let mut request_text = format!(
             "以下是一段完整的对话记录:\n\n{}\n\n请压缩以上对话。直接输出摘要正文。",
             transcript
@@ -172,9 +179,11 @@ impl<'a> CompactionRuntime<'a> {
             cancel,
         ) {
             ModelCallResult::Done(output) => output,
-            ModelCallResult::Cancelled(_) => return CompactionOutcome::Cancelled,
+            ModelCallResult::Cancelled(_) => {
+                return Self::failed(id, trigger, "压缩已取消".into(), true, emit)
+            }
             ModelCallResult::Failed(failed) => {
-                return CompactionOutcome::Failed(failed.error.to_string())
+                return Self::failed(id, trigger, failed.error.to_string(), false, emit)
             }
         };
 
@@ -186,7 +195,7 @@ impl<'a> CompactionRuntime<'a> {
             cache: self.usage_total.cache,
         });
         if summary.is_empty() {
-            return CompactionOutcome::Failed("模型返回了空摘要".into());
+            return Self::failed(id, trigger, "模型返回了空摘要".into(), false, emit);
         }
 
         let summary_chars = summary.chars().count();
@@ -207,16 +216,44 @@ impl<'a> CompactionRuntime<'a> {
         {
             Ok(mut appended) => self.entries.append(&mut appended),
             Err(error) => {
-                return CompactionOutcome::Failed(format!(
-                    "保存会话失败,压缩事实未写入,内存历史未推进: {error:#}"
-                ))
+                return Self::failed(
+                    id,
+                    trigger,
+                    format!("保存会话失败,压缩事实未写入,内存历史未推进: {error:#}"),
+                    false,
+                    emit,
+                )
             }
         }
 
-        CompactionOutcome::Committed {
+        emit(AgentEvent::CompactionFinished {
+            id,
+            trigger,
             tokens_before,
             summary_chars,
             retained_messages,
+        });
+        CompactionOutcome::Committed
+    }
+
+    fn failed(
+        id: String,
+        trigger: CompactionTrigger,
+        error: String,
+        cancelled: bool,
+        emit: &mut dyn FnMut(AgentEvent),
+    ) -> CompactionOutcome {
+        emit(AgentEvent::CompactionFailed {
+            id,
+            trigger,
+            error: error.clone(),
+            cancelled,
+            history_changed: false,
+        });
+        if cancelled {
+            CompactionOutcome::Cancelled
+        } else {
+            CompactionOutcome::Failed(error)
         }
     }
 }
@@ -245,19 +282,10 @@ impl Agent {
                 emit(AgentEvent::Notice("当前会话没有可压缩的历史".into()));
                 emit(AgentEvent::TurnFinished { cancelled: false });
             }
-            CompactionOutcome::Committed {
-                tokens_before,
-                summary_chars,
-                retained_messages,
-            } => {
-                emit(AgentEvent::Notice(format!(
-                    "历史已压缩:压缩前估算约 {tokens_before} tokens,摘要 {summary_chars} 字符,\
-                     保留 {retained_messages} 条最近消息。事实日志保留全部原始记录。"
-                )));
+            CompactionOutcome::Committed => {
                 emit(AgentEvent::TurnFinished { cancelled: false });
             }
             CompactionOutcome::Cancelled => {
-                emit(AgentEvent::Notice("压缩已取消,历史未变化".into()));
                 emit(AgentEvent::TurnFinished { cancelled: true });
             }
             CompactionOutcome::Failed(error) => {

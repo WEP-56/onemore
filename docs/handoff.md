@@ -2,6 +2,7 @@
 
 更新日期：2026-08-10
 工作区：`E:\onemore-cli`
+功能代码基线：`8fc3df4 添加web_search工具`
 
 ## 开始前必须知道
 
@@ -13,6 +14,9 @@
 
 以上三项目前均已完成可交付实现。Web 的外部 Tavily、Brave Search、Exa、Serper backend
 也已接入；Web 专用 RPC DTO 仍是后续任务。用户明确允许 RPC 层先只写 TODO，暂不实现协议。
+
+`docs/next-phase-goals.md` 是本阶段最初路线图，不是实时完成状态。其中“明确延期”的工作区
+搜索和 Web 搜索后来已经提前完成；后续会话必须以本文的完成状态为准，不要重复实现。
 
 其他明确决定：
 
@@ -110,11 +114,17 @@
 工具统一返回 `ToolOutput { model_text, ui_summary, details }`，模型文本和 UI 摘要经过 ANSI/C0
 控制字符清洗及 24K 总上限，失败保留稳定 `ToolErrorCode`。
 
-## 已完成：Web capability 基础与 OpenAI native search
+## 已完成：Web capability、OpenAI native 与四家 external backend
 
 核心文件：
 
 - `src/web.rs`
+- `src/web/tavily.rs`
+- `src/web/brave.rs`
+- `src/web/exa.rs`
+- `src/web/serper.rs`
+- `src/web/http_client.rs`
+- `src/tools/web_search.rs`
 - `src/config.rs`
 - `src/provider/openai_responses.rs`
 - `src/provider/mod.rs`
@@ -127,7 +137,9 @@
 [web] config
   -> capability resolver
   -> frozen WebCapabilityBinding
-  -> provider request + prompt/cache identity
+      -> OpenAI hosted tool -> provider request
+      -> HarnessFunction -> local web_search tool
+  -> prompt/cache identity（不含密钥）
 ```
 
 当前行为：
@@ -153,9 +165,25 @@
 
 - Anthropic/DeepSeek/xAI native Web adapters。
 - Web started/completed/failed、sources/provenance 的稳定 SDK/RPC DTO 与一等持久化。
-- 通用 `web_fetch`、抓取缓存和浏览器控制。
+- 通用 `web_fetch`、抓取缓存和浏览器控制。用户当前判断 `run_command + curl` 已能覆盖偶发抓取，
+  `web_fetch` 必要性不强，明确暂缓；只有反复出现 HTML 正文清洗、SSRF/重定向约束、统一来源元数据
+  或跨 shell 可移植性问题时再评估窄范围只读实现。
 
-RPC 延期项已记录在 `docs/workspace-and-web-tools.md`。在用户改变决定前，不要为 Web 修改 RPC 协议。
+RPC 延期项已记录在 `docs/workspace-and-web-tools.md`。可以先设计 provider-neutral runtime/SDK
+source 事件，但在用户改变决定前，不要为 Web 修改 RPC 协议。
+
+## 路线图实时状态
+
+| `next-phase-goals.md` 里程碑 | 当前状态 | 下一步 |
+| --- | --- | --- |
+| A：可观察的运行基础 | 已完成 | compaction 生命周期、固定计划面板、可展开工具详情、实时工具进度和长任务回归均已贯通 |
+| B：进程与编辑能力 | 已取消 | 用户决定取消该里程碑，不实现结构化 patch/edit 或 `process_start/read/write/wait/stop` |
+| C：Skill 范式与 reload | 已完成 | 只做回归维护，不再设计旧目录兼容 |
+| D：诊断与回归 | 部分完成 | workspace/Web 已完成；结构化编译/测试诊断和真实 provider 的 usage/compaction/retry 验证仍未完成 |
+
+TUI 已消费 `ToolCallStarted`、retry、compaction 和计划事件；工具详情使用稳定 `tool_call_id`，
+主 transcript 只显示有界头尾预览，完整内容通过 `Ctrl+T` 或 `/tools` overlay 查看。进入后续工作前
+仍需区分 runtime/SDK 缺少事实、适配层未投影和 TUI 未展示三类问题。
 
 ## 必须保持的可靠性约束
 
@@ -176,7 +204,7 @@ RPC 延期项已记录在 `docs/workspace-and-web-tools.md`。在用户改变决
 
 2026-08-10 的最终完整回归已通过：
 
-- 256 个 unit tests。
+- 270 个 unit tests。
 - 1 个 RPC subprocess test。
 - 8 个 provider wire tests。
 - 0 failed、0 ignored。
@@ -193,17 +221,21 @@ git diff --check
 Cargo 在当前 E: 盘文件系统上会提示 incremental cache 无法 hard link 并自动复制。这是环境 warning，
 不是 Rust lint 或测试失败。测试内临时 Git 仓库还可能打印 LF/CRLF warning，同样不影响结果。
 
-GUI approval 阶段曾通过 `npm run build`；最后这轮 Workspace/Web 修改未触碰 GUI 源码。
+GUI `npm run build` 与 Tauri Rust `cargo check` 均已通过；工具输出 v3 DTO 同步到 GUI reducer。
+
+外部 Web live smoke：Tavily、Exa、Serper 已用免费计划真实接口成功验证；Brave Search 按用户要求
+只做离线 wire fixture。OpenAI native Web 尚未使用真实 API key 做 live smoke。测试密钥没有写入仓库，
+配置回归同时覆盖 `[web.backends.<name>].api_key` 直写和凭据不进入 binding identity。
 
 ## 下一会话建议顺序
 
 1. 先读本文、`docs/workspace-and-web-tools.md` 和 `docs/next-phase-goals.md`。
-2. 外部 `HarnessFunction` trait 与四家 backend 已完成；如继续 Web，优先定义稳定 SDK/TUI source
-   事件，或实现 Anthropic/DeepSeek/xAI native adapter。
-3. 不要提前实现 Web RPC DTO；用户已同意该层只保留 TODO。
-4. 原路线图仍未完成的主要工具能力包括：结构化 patch/edit、长进程生命周期、结构化诊断结果，
-   以及 TUI 的工具详情/固定计划/retry/compaction 可观察性。开始其中任何一项前先与用户确认优先级。
-5. OpenAI native Web 只做了 request/stream fixture 单测，尚未使用真实 API key 做 live smoke test。
+2. 里程碑 A 已完成；后续只需维护 `AgentEvent -> ProgressEvent/SessionSnapshot -> TUI` 链路，
+   保持稳定 ID、快照权威和有界输出约束。
+3. 不进入已取消的里程碑 B；后续优先做结构化编译/测试诊断及真实 provider
+   usage/retry/compaction 验证。
+4. Web 后续仅考虑 provider-native adapter 或 provider-neutral source 事件；`web_fetch` 暂缓，
+   Web RPC DTO 继续保留 TODO，除非用户明确改变优先级。
 
 ## 推荐阅读顺序
 
@@ -211,17 +243,20 @@ GUI approval 阶段曾通过 `npm run build`；最后这轮 Workspace/Web 修改
 docs/handoff.md
 docs/workspace-and-web-tools.md
 docs/next-phase-goals.md
+src/event.rs
+src/sdk/view.rs
+src/runtime/session_events.rs
+src/runtime/compaction.rs
+src/tui/mod.rs
+src/tui/transcript.rs
+src/plan.rs
+src/tools/edit_file.rs
+src/tools/run_command.rs
 src/tools/mod.rs
-src/tools/glob.rs
-src/tools/search.rs
-src/tools/git.rs
-src/web.rs
-src/config.rs
-src/provider/openai_responses.rs
-src/runtime/builder.rs
-src/runtime/commands.rs
-src/permission/command_risk.rs
 ```
+
+开始 Web 后续工作时再读 `src/web.rs`、`src/tools/web_search.rs`、`src/config.rs` 和对应 adapter；
+开始权限回归时再读 `src/permission/command_risk.rs` 与 `src/runtime/tool_execution.rs`。
 
 开源方案调研记录在 `docs/open-source-agent-research.md`。本机还保留了用于只读调研的 Codex 浅克隆：
 

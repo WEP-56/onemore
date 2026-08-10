@@ -31,6 +31,7 @@ pub enum Cell {
         id: String,
         name: String,
         summary: String,
+        progress: Option<String>,
         output: Option<String>,
         is_error: bool,
     },
@@ -39,8 +40,29 @@ pub enum Cell {
         items: Vec<PlanItem>,
         explanation: Option<String>,
     },
+    Compaction {
+        id: String,
+        automatic: bool,
+        estimated_tokens: u64,
+        available_tokens: Option<u64>,
+        outcome: CompactionOutcome,
+    },
     Notice(String),
     Error(String),
+}
+
+pub enum CompactionOutcome {
+    Running,
+    Finished {
+        tokens_before: u64,
+        summary_chars: usize,
+        retained_messages: usize,
+    },
+    Failed {
+        error: String,
+        cancelled: bool,
+        history_changed: bool,
+    },
 }
 
 struct Entry {
@@ -136,6 +158,72 @@ impl Transcript {
         self.invalidate_layout();
     }
 
+    pub fn start_compaction(
+        &mut self,
+        id: String,
+        automatic: bool,
+        estimated_tokens: u64,
+        available_tokens: Option<u64>,
+    ) {
+        self.entries.push(Entry::new(Cell::Compaction {
+            id,
+            automatic,
+            estimated_tokens,
+            available_tokens,
+            outcome: CompactionOutcome::Running,
+        }));
+        self.invalidate_layout();
+    }
+
+    pub fn finish_compaction(
+        &mut self,
+        id: &str,
+        tokens_before: u64,
+        summary_chars: usize,
+        retained_messages: usize,
+    ) {
+        self.update_compaction(
+            id,
+            CompactionOutcome::Finished {
+                tokens_before,
+                summary_chars,
+                retained_messages,
+            },
+        );
+    }
+
+    pub fn fail_compaction(
+        &mut self,
+        id: &str,
+        error: String,
+        cancelled: bool,
+        history_changed: bool,
+    ) {
+        self.update_compaction(
+            id,
+            CompactionOutcome::Failed {
+                error,
+                cancelled,
+                history_changed,
+            },
+        );
+    }
+
+    fn update_compaction(&mut self, id: &str, outcome: CompactionOutcome) {
+        if let Some(entry) = self.entries.iter_mut().rev().find(
+            |entry| matches!(&entry.cell, Cell::Compaction { id: cell_id, .. } if cell_id == id),
+        ) {
+            if let Cell::Compaction {
+                outcome: current, ..
+            } = &mut entry.cell
+            {
+                *current = outcome;
+                entry.touch();
+                self.invalidate_layout();
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.layout = LayoutCache::default();
@@ -151,6 +239,9 @@ impl Transcript {
                 return;
             }
         }
+        // 正文开始意味着前一段思考已经结束。及时封口后，思考内容可以在
+        // 当前 loop 结束前进入终端 scrollback，而不会阻塞后续单元格。
+        self.close_open_cells();
         self.entries.push(Entry::new(Cell::Assistant {
             text: delta.to_string(),
             open: true,
@@ -168,6 +259,7 @@ impl Transcript {
                 return;
             }
         }
+        self.close_open_cells();
         self.entries.push(Entry::new(Cell::Thinking {
             text: delta.to_string(),
             open: true,
@@ -177,25 +269,29 @@ impl Transcript {
 
     /// 助手消息完成:用全文校正开放中的 Cell(流式增量偶有丢失时兜底)。
     pub fn finalize_assistant(&mut self, full: String) {
+        let mut full = Some(full);
         for e in self.entries.iter_mut().rev() {
             if let Cell::Assistant { text, open } = &mut e.cell {
                 if *open {
-                    *text = full;
+                    *text = full.take().expect("final assistant text is available");
                     *open = false;
                     e.touch();
-                    self.invalidate_layout();
-                    return;
                 }
                 break;
             }
         }
-        if !full.is_empty() {
-            self.entries.push(Entry::new(Cell::Assistant {
-                text: full,
-                open: false,
-            }));
-            self.invalidate_layout();
+        if let Some(full) = full {
+            if !full.is_empty() {
+                self.entries.push(Entry::new(Cell::Assistant {
+                    text: full,
+                    open: false,
+                }));
+            }
         }
+        // 有些 provider 只有思考增量和最终正文，没有正文增量。消息完成必须
+        // 同时封口更早的 Thinking，否则整个 loop 的 finalized prefix 都会被卡住。
+        self.close_open_cells();
+        self.invalidate_layout();
     }
 
     /// 关闭所有开放中的 Cell(一轮结束时调用)。
@@ -212,14 +308,40 @@ impl Transcript {
     }
 
     pub fn push_tool(&mut self, id: String, name: String, summary: String) {
+        // 工具调用标志着本次模型输出结束；即使该响应没有正文，也要封口思考。
+        self.close_open_cells();
         self.entries.push(Entry::new(Cell::Tool {
             id,
             name,
             summary,
+            progress: None,
             output: None,
             is_error: false,
         }));
         self.invalidate_layout();
+    }
+
+    /// 按调用 ID 更新仍在执行中的工具摘要，不把 Cell 提前封口。
+    pub fn update_tool(&mut self, id: &str, progress: String) {
+        if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
+            matches!(
+                &entry.cell,
+                Cell::Tool {
+                    id: cell_id,
+                    output: None,
+                    ..
+                } if cell_id == id
+            )
+        }) {
+            if let Cell::Tool {
+                progress: current, ..
+            } = &mut entry.cell
+            {
+                *current = Some(progress);
+                entry.touch();
+                self.invalidate_layout();
+            }
+        }
     }
 
     /// 按调用 ID 把结果填进对应的工具 Cell(找不到时退回最近一个运行中的)。
@@ -246,11 +368,13 @@ impl Transcript {
         if let Some(index) = fallback {
             if let Cell::Tool {
                 output: slot,
+                progress,
                 is_error: err_flag,
                 ..
             } = &mut self.entries[index].cell
             {
                 *slot = Some(output);
+                *progress = None;
                 *err_flag = is_error;
                 self.entries[index].touch();
                 self.invalidate_layout();
@@ -332,6 +456,7 @@ fn cell_is_finalized(cell: &Cell) -> bool {
         Cell::User(_) | Cell::Plan { .. } | Cell::Notice(_) | Cell::Error(_) => true,
         Cell::Assistant { open, .. } | Cell::Thinking { open, .. } => !open,
         Cell::Tool { output, .. } => output.is_some(),
+        Cell::Compaction { outcome, .. } => !matches!(outcome, CompactionOutcome::Running),
     }
 }
 
@@ -402,6 +527,7 @@ fn build_lines(cell: &Cell, width: u16) -> Vec<Line<'static>> {
         Cell::Tool {
             name,
             summary,
+            progress,
             output,
             is_error,
             ..
@@ -413,35 +539,53 @@ fn build_lines(cell: &Cell, width: u16) -> Vec<Line<'static>> {
             };
             let mut v = wrap_styled(&head, w, "● ", "  ", style_tool_head(*is_error));
             match output {
-                None => v.push(Line::styled("  运行中…", style_dim())),
+                None => v.push(Line::styled(
+                    format!(
+                        "  {}",
+                        progress
+                            .as_deref()
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or("运行中…")
+                    ),
+                    style_dim(),
+                )),
                 Some(out) => {
                     let body_style = if *is_error {
                         Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
                     } else {
                         style_dim()
                     };
-                    let mut shown = 0usize;
                     let logical: Vec<&str> = out.lines().collect();
-                    for line in &logical {
-                        if shown >= TOOL_PREVIEW_LINES {
-                            break;
+                    let content_width = w.saturating_sub(2).max(8);
+                    if logical.len() <= TOOL_PREVIEW_LINES {
+                        for line in logical {
+                            v.push(Line::styled(
+                                format!("  {}", util::ellipsis(line, content_width)),
+                                body_style,
+                            ));
                         }
-                        let wrapped = wrap_styled(
-                            &util::ellipsis(line, w.saturating_sub(2).max(8) * 2),
-                            w,
-                            "  ",
-                            "  ",
-                            body_style,
-                        );
-                        shown += wrapped.len().max(1);
-                        v.extend(wrapped);
-                    }
-                    let hidden = logical.len().saturating_sub(shown.min(logical.len()));
-                    if hidden > 0 {
+                    } else {
+                        let head = 6;
+                        let tail = TOOL_PREVIEW_LINES.saturating_sub(head + 1);
+                        for line in logical.iter().take(head) {
+                            v.push(Line::styled(
+                                format!("  {}", util::ellipsis(line, content_width)),
+                                body_style,
+                            ));
+                        }
                         v.push(Line::styled(
-                            format!("  … (+{} 行,完整内容已回传给模型)", hidden),
+                            format!(
+                                "  … 省略 {} 行 · Ctrl+T 查看完整内容",
+                                logical.len() - head - tail
+                            ),
                             style_dim(),
                         ));
+                        for line in logical.iter().skip(logical.len() - tail) {
+                            v.push(Line::styled(
+                                format!("  {}", util::ellipsis(line, content_width)),
+                                body_style,
+                            ));
+                        }
                     }
                 }
             }
@@ -485,6 +629,88 @@ fn build_lines(cell: &Cell, width: u16) -> Vec<Line<'static>> {
                 ));
             }
             lines
+        }
+        Cell::Compaction {
+            automatic,
+            estimated_tokens,
+            available_tokens,
+            outcome,
+            ..
+        } => {
+            let source = if *automatic { "自动" } else { "手动" };
+            match outcome {
+                CompactionOutcome::Running => {
+                    let mut lines = vec![Line::styled(
+                        format!("◐ 正在{}压缩历史", source),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    let budget = match available_tokens {
+                        Some(available) => format!(
+                            "上下文约 {} / {} tokens",
+                            util::fmt_tokens(*estimated_tokens),
+                            util::fmt_tokens(*available)
+                        ),
+                        None => format!("上下文约 {} tokens", util::fmt_tokens(*estimated_tokens)),
+                    };
+                    lines.extend(wrap_styled(&budget, w, "  ", "  ", style_dim()));
+                    lines
+                }
+                CompactionOutcome::Finished {
+                    tokens_before,
+                    summary_chars,
+                    retained_messages,
+                } => {
+                    let mut lines = vec![Line::styled(
+                        format!("✓ {}压缩完成", source),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    lines.extend(wrap_styled(
+                        &format!(
+                            "压缩前约 {} tokens · 摘要 {} 字符 · 保留 {} 条消息",
+                            util::fmt_tokens(*tokens_before),
+                            summary_chars,
+                            retained_messages
+                        ),
+                        w,
+                        "  ",
+                        "  ",
+                        style_dim(),
+                    ));
+                    lines
+                }
+                CompactionOutcome::Failed {
+                    error,
+                    cancelled,
+                    history_changed,
+                } => {
+                    let title = if *cancelled {
+                        format!("■ {}压缩已取消", source)
+                    } else {
+                        format!("✖ {}压缩失败", source)
+                    };
+                    let style = if *cancelled {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    }
+                    .add_modifier(Modifier::BOLD);
+                    let mut lines = vec![Line::styled(title, style)];
+                    lines.extend(wrap_styled(error, w, "  ", "  ", style_dim()));
+                    lines.push(Line::styled(
+                        if *history_changed {
+                            "  历史已改变"
+                        } else {
+                            "  历史未改变"
+                        },
+                        style_dim(),
+                    ));
+                    lines
+                }
+            }
         }
         Cell::Notice(t) => wrap_styled(t, w, "· ", "  ", style_dim()),
         Cell::Error(t) => wrap_styled(t, w, "✖ ", "  ", Style::default().fg(Color::Red)),
@@ -562,6 +788,48 @@ mod tests {
     }
 
     #[test]
+    fn streaming_phase_changes_release_finalized_prefix_during_loop() {
+        let mut transcript = Transcript::default();
+
+        transcript.append_thinking("先检查项目结构");
+        transcript.append_assistant("我先读取配置。");
+        let thinking = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(thinking.contains("先检查项目结构"));
+        assert!(transcript.drain_finalized_lines(80).is_empty());
+
+        transcript.finalize_assistant("我先读取配置。".into());
+        let assistant = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(assistant.contains("我先读取配置。"));
+
+        transcript.append_thinking("需要调用工具");
+        transcript.push_tool("tool-1".into(), "read_file".into(), "config.toml".into());
+        let before_tool = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(before_tool.contains("需要调用工具"));
+        assert!(transcript.drain_finalized_lines(80).is_empty());
+
+        let running = format!("{:?}", transcript.visible_lines(80, 8, 0).0);
+        assert!(running.contains("read_file"));
+        assert!(running.contains("运行中"));
+
+        transcript.finish_tool("tool-1", "读取完成".into(), false);
+        let tool = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(tool.contains("read_file"));
+        assert!(tool.contains("读取完成"));
+    }
+
+    #[test]
+    fn assistant_finished_closes_thinking_without_text_deltas() {
+        let mut transcript = Transcript::default();
+        transcript.append_thinking("只流式返回了思考");
+        transcript.finalize_assistant("最终回复".into());
+
+        let rendered = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(rendered.contains("只流式返回了思考"));
+        assert!(rendered.contains("最终回复"));
+        assert!(transcript.drain_finalized_lines(80).is_empty());
+    }
+
+    #[test]
     fn plan_cell_renders_true_statuses_and_clear_state() {
         let mut transcript = Transcript::default();
         transcript.push_plan(
@@ -588,5 +856,34 @@ mod tests {
         assert!(rendered.contains("[ ] later"));
         assert!(rendered.contains("计划 #4 已清空"));
         assert!(!rendered.contains("[x] active"));
+    }
+
+    #[test]
+    fn compaction_cell_stays_live_then_renders_one_terminal_summary() {
+        let mut transcript = Transcript::default();
+        transcript.start_compaction("compact-1".into(), true, 128_000, Some(151_000));
+
+        assert!(transcript.drain_finalized_lines(80).is_empty());
+        let running = format!("{:?}", transcript.visible_lines(80, 10, 0).0);
+        assert!(running.contains("正在自动压缩历史"));
+        assert!(running.contains("128k / 151k tokens"));
+
+        transcript.finish_compaction("compact-1", 120_000, 4_000, 12);
+        let finished = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(finished.contains("自动压缩完成"));
+        assert!(finished.contains("摘要 4000 字符"));
+        assert!(finished.contains("保留 12 条消息"));
+    }
+
+    #[test]
+    fn failed_compaction_reports_unchanged_history() {
+        let mut transcript = Transcript::default();
+        transcript.start_compaction("compact-2".into(), false, 42_000, None);
+        transcript.fail_compaction("compact-2", "provider unavailable".into(), false, false);
+
+        let rendered = format!("{:?}", transcript.drain_finalized_lines(80));
+        assert!(rendered.contains("手动压缩失败"));
+        assert!(rendered.contains("provider unavailable"));
+        assert!(rendered.contains("历史未改变"));
     }
 }

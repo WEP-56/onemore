@@ -7,6 +7,7 @@ import type {
   ServerInfo,
   SessionPhase,
   SessionSnapshot,
+  ToolMetadataView,
 } from "../rpc/protocol";
 
 export type ConnState =
@@ -33,6 +34,8 @@ export interface LiveTool {
   name: string;
   summary: string;
   output: string;
+  outputSummary: string;
+  metadata: ToolMetadataView;
   status: "started" | "updated" | "finished";
   error: string | null;
   sealed: boolean;

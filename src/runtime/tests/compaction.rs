@@ -105,9 +105,35 @@ fn automatic_compaction_uses_manual_path_and_retains_recent_messages() {
     assert_eq!(compaction.retained_messages[0].text(), "recent");
     assert_eq!(compaction.retained_messages[1].text(), "next");
     assert_eq!(agent.entries.len(), facts_before + 3);
-    assert!(events
+    let started = events
         .iter()
-        .any(|event| matches!(event, AgentEvent::Notice(text) if text.contains("已自动压缩"))));
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::CompactionStarted {
+                    trigger: crate::event::CompactionTrigger::Automatic,
+                    estimated_tokens,
+                    available_tokens: Some(900),
+                    ..
+                } if *estimated_tokens > 900
+            )
+        })
+        .expect("自动压缩应发出 started 事件");
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::CompactionFinished {
+                    trigger: crate::event::CompactionTrigger::Automatic,
+                    summary_chars: 16,
+                    retained_messages: 2,
+                    ..
+                }
+            )
+        })
+        .expect("自动压缩应发出 finished 事件");
+    assert!(started < finished);
 
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 2, "一次摘要调用 + 一次正常模型调用");
@@ -184,6 +210,15 @@ fn automatic_compaction_failure_and_cancel_do_not_append_a_summary() {
             .any(|entry| matches!(entry.payload, SessionEntryPayload::Compaction(_))));
         assert!(events.iter().any(|event| matches!(
             event,
+            AgentEvent::CompactionFailed {
+                trigger: crate::event::CompactionTrigger::Automatic,
+                cancelled: actual,
+                history_changed: false,
+                ..
+            } if *actual == cancelled
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
             AgentEvent::TurnFinished { cancelled: actual } if *actual == cancelled
         )));
         let _ = std::fs::remove_dir_all(root);
@@ -240,6 +275,6 @@ fn automatic_compaction_persistence_failure_does_not_advance_memory_facts() {
         .any(|entry| matches!(entry.payload, SessionEntryPayload::Compaction(_))));
     assert!(events
         .iter()
-        .any(|event| matches!(event, AgentEvent::Error(text) if text.contains("压缩事实未写入"))));
+        .any(|event| matches!(event, AgentEvent::CompactionFailed { error, history_changed: false, .. } if error.contains("压缩事实未写入"))));
     let _ = std::fs::remove_dir_all(root);
 }

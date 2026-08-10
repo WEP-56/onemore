@@ -30,7 +30,7 @@
 ### 1.1 Hello——第一次握手
 
 ```bash
-printf '{"type":"hello","version":1}\n' | onemore --rpc
+printf '{"type":"hello","version":3}\n' | onemore --rpc
 ```
 
 你会看到一帧 `hello`：`server`（进程实例 ID、协议版本、能力位、模型目录）+ `snapshot`
@@ -41,7 +41,7 @@ printf '{"type":"hello","version":1}\n' | onemore --rpc
 ### 1.2 Request / Response——问一个查询
 
 ```bash
-printf '{"type":"hello","version":1}\n{"type":"request","id":"req-1","request":{"command":"get_snapshot"}}\n' \
+printf '{"type":"hello","version":3}\n{"type":"request","id":"req-1","request":{"command":"get_snapshot"}}\n' \
   | onemore --rpc
 ```
 
@@ -58,7 +58,7 @@ printf '{"type":"hello","version":1}\n{"type":"request","id":"req-1","request":{
 
 ```bash
 printf '%s\n' \
-  '{"type":"hello","version":1}' \
+  '{"type":"hello","version":3}' \
   '{"type":"request","id":"req-1","request":{"command":"prompt","text":"请只读检查当前工作区，不要修改文件"}}' \
   | onemore --rpc
 ```
@@ -220,7 +220,7 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 |---|---|---|
 | 卡在握手 / `unterminated_frame: RPC frame must end with LF` | 发送帧没以 LF 结尾 | writer 统一补 `\n` |
 | `invalid_handshake: first frame must be hello` | 第一帧发了 request | 严格先 hello |
-| `version_mismatch` | hello 的 version ≠ 1 | 精确版本协商，不降级 |
+| `version_mismatch` | hello 的 version ≠ 3 | 精确版本协商，不降级 |
 | `busy` | running 时发 prompt | 改用 steer / follow_up |
 | `duplicate_request_id` | 复用了 request ID | 单调递增，不重用 |
 | 进程残留、审批静默通过 | 退出没关 stdin / 断连自动允许 | EOF → 等退出 → 超时 kill；fail closed |
@@ -233,7 +233,7 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 
 - [ ] 不经 shell 启动子进程，`current_dir` = workspace
 - [ ] 启动后立即接管三路流，先发 `hello`（带 LF）
-- [ ] 等待 hello 成功，校验 version == 1，拒绝降级
+- [ ] 等待 hello 成功，校验 version == 3，拒绝降级
 - [ ] stdout 用增量 JSONL reader，stderr 独立有界保留
 - [ ] 单 writer task 独占 stdin，统一补 LF
 - [ ] request ID 唯一，pending map 关联 response
@@ -264,6 +264,6 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 ## 附：Windows 上手动实验的提示
 
 - 上面的 `printf` 示例在 Git Bash 下可用；PowerShell 请改用
-  `"{\"type\":\"hello\",\"version\":1}" | onemore --rpc`（注意编码为 UTF-8）。
+  `"{\"type\":\"hello\",\"version\":3}" | onemore --rpc`（注意编码为 UTF-8）。
 - 想看完整 prompt 流时，先让窗口保持打开：管道输入 EOF 会立即触发安全关闭，
   事件只输出到 EOF 前——这本身就是"EOF = shutdown"的直观演示。

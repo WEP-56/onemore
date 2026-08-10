@@ -210,7 +210,7 @@ mod tests {
     fn envelopes_reject_coerced_versions_and_unknown_commands() {
         assert!(serde_json::from_value::<ClientMessage>(json!({
             "type": "hello",
-            "version": "1"
+            "version": "2"
         }))
         .is_err());
         assert!(serde_json::from_value::<ClientMessage>(json!({

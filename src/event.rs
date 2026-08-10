@@ -68,6 +68,13 @@ pub enum InputQueueKind {
     FollowUp,
 }
 
+/// 会话压缩的触发来源。前端用它区分用户显式请求与 runtime 自动保护。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTrigger {
+    Automatic,
+    Manual,
+}
+
 /// Runtime → 前端。前端拿到的信息足以完整重建对话画面。
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -88,6 +95,30 @@ pub enum AgentEvent {
     RetryStarted {
         attempt: u32,
         max_retries: u32,
+    },
+
+    /// 一次压缩模型调用已经开始。终态事件用 `id` 与它严格配对。
+    CompactionStarted {
+        id: String,
+        trigger: CompactionTrigger,
+        estimated_tokens: u64,
+        available_tokens: Option<u64>,
+    },
+    /// 压缩事实已经成功持久化，内存模型视图可以安全推进。
+    CompactionFinished {
+        id: String,
+        trigger: CompactionTrigger,
+        tokens_before: u64,
+        summary_chars: usize,
+        retained_messages: usize,
+    },
+    /// 压缩没有提交。`history_changed` 当前必须为 false，用于锁定原子性契约。
+    CompactionFailed {
+        id: String,
+        trigger: CompactionTrigger,
+        error: String,
+        cancelled: bool,
+        history_changed: bool,
     },
 
     /// 助手文本增量(streaming)。前端应把它追加到"当前助手消息"。

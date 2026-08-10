@@ -8,7 +8,7 @@ mod controller;
 mod shared;
 mod view;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub(crate) use shared::{SessionShared, UiMetadata};
 pub(crate) use view::{model_metadata, project_snapshot, SnapshotSource};
@@ -20,7 +20,8 @@ pub use controller::{
 pub use view::{
     ApprovalDecisionView, ApprovalRequestView, ApprovalResponseView, ApprovalScopeView,
     AssistantBlockView, AssistantStatus, Capabilities, CommandErrorView, CommandStatus,
-    ModelMetadata, ModelSelection, ModelSelectionView, PlanItemView, PlanView, ProgressEvent,
-    QueueView, QueuedInputView, ServerInfo, SessionEvent, SessionPhase, SessionSnapshot,
-    SessionSummaryView, SkillMetadataView, SkillScopeView, ToolStatus, TranscriptItem, UsageView,
+    CompactionTriggerView, ModelMetadata, ModelSelection, ModelSelectionView, PlanItemView,
+    PlanView, ProgressEvent, QueueView, QueuedInputView, ServerInfo, SessionEvent, SessionPhase,
+    SessionSnapshot, SessionSummaryView, SkillMetadataView, SkillScopeView, ToolMetadataView,
+    ToolOutputView, ToolStatus, TranscriptItem, UsageView,
 };

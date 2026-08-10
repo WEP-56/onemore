@@ -10,6 +10,7 @@ pub enum SlashCommand {
     Provider,
     Session,
     Skill,
+    Tools,
     Queue,
     Compact,
     Reload,
@@ -56,6 +57,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         command: SlashCommand::Skill,
         name: "skill",
         description: "选择并加载一个本地技能",
+        accepts_args: true,
+    },
+    CommandSpec {
+        command: SlashCommand::Tools,
+        name: "tools",
+        description: "查看本会话的工具调用与完整输出",
         accepts_args: true,
     },
     CommandSpec {

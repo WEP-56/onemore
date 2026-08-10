@@ -3,7 +3,7 @@
 ## Design Documents
 
 - [Runtime 结构与弱 Harness 边界](docs/runtime-architecture.md)
-- [Rust SDK 与 JSONL RPC v1](docs/rpc-sdk-design.md)
+- [Rust SDK 与 JSONL RPC v3](docs/rpc-sdk-design.md)
 - [提示词缓存设计](docs/prompt-cache.md)
 - [API 兼容性与 Chat Completions 删除](docs/api-compatibility.md)
 - [Reasoning effort 配置与 TUI 行为](docs/reason-effort.md)
@@ -110,14 +110,14 @@ fn run_prompt(agent: Agent) -> Result<SessionSnapshot, Box<dyn std::error::Error
 
 ```powershell
 @(
-  '{"type":"hello","version":1}'
+  '{"type":"hello","version":3}'
   '{"type":"request","id":"snapshot","request":{"command":"get_snapshot"}}'
   '{"type":"request","id":"shutdown","request":{"command":"shutdown"}}'
 ) | cargo run --quiet -- --rpc
 ```
 
 帧限制、公开数据白名单、完整命令集和审批示例见
-[Rust SDK 与 JSONL RPC v1](docs/rpc-sdk-design.md)。
+[Rust SDK 与 JSONL RPC v3](docs/rpc-sdk-design.md)。
 
 不需要 Onemore stateful harness 的宿主可以直接调用同一条生产 core loop：
 

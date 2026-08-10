@@ -146,9 +146,13 @@ fn compact_appends_fact_and_shrinks_model_view() {
     assert!(!events
         .iter()
         .any(|event| matches!(event, AgentEvent::AssistantDelta(_))));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, AgentEvent::Notice(text) if text.contains("历史已压缩"))));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::CompactionFinished {
+            trigger: crate::event::CompactionTrigger::Manual,
+            ..
+        }
+    )));
     let _ = std::fs::remove_dir_all(root);
 }
 

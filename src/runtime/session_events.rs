@@ -33,6 +33,8 @@ pub(super) struct EventAdapter<'a> {
     revision: &'a mut u64,
     message_id: String,
     failed: bool,
+    cancelled: bool,
+    compaction_active: bool,
     last_error: Option<CommandErrorView>,
 }
 
@@ -52,6 +54,8 @@ impl<'a> EventAdapter<'a> {
             revision,
             message_id: uuid::Uuid::new_v4().to_string(),
             failed: false,
+            cancelled: false,
+            compaction_active: false,
             last_error: None,
         }
     }
@@ -62,6 +66,10 @@ impl<'a> EventAdapter<'a> {
 
     pub(super) fn last_error(&self) -> Option<&CommandErrorView> {
         self.last_error.as_ref()
+    }
+
+    pub(super) fn cancelled(&self) -> bool {
+        self.cancelled
     }
 
     pub(super) fn emit(&mut self, event: AgentEvent) {
@@ -90,10 +98,72 @@ impl<'a> EventAdapter<'a> {
                 attempt,
                 max_retries,
             } => {
-                self.update_phase(SessionPhase::Running);
+                self.update_phase(if self.compaction_active {
+                    SessionPhase::Compacting
+                } else {
+                    SessionPhase::Running
+                });
                 Some(ProgressEvent::RetryStarted {
                     attempt,
                     max_retries,
+                })
+            }
+            AgentEvent::CompactionStarted {
+                id,
+                trigger,
+                estimated_tokens,
+                available_tokens,
+            } => {
+                self.compaction_active = true;
+                self.update_phase(SessionPhase::Compacting);
+                Some(ProgressEvent::CompactionStarted {
+                    compaction_id: id,
+                    trigger: trigger.into(),
+                    estimated_tokens,
+                    available_tokens,
+                })
+            }
+            AgentEvent::CompactionFinished {
+                id,
+                trigger,
+                tokens_before,
+                summary_chars,
+                retained_messages,
+            } => {
+                self.compaction_active = false;
+                self.update_phase(SessionPhase::Running);
+                Some(ProgressEvent::CompactionFinished {
+                    compaction_id: id,
+                    trigger: trigger.into(),
+                    tokens_before,
+                    summary_chars,
+                    retained_messages,
+                })
+            }
+            AgentEvent::CompactionFailed {
+                id,
+                trigger,
+                error,
+                cancelled,
+                history_changed,
+            } => {
+                self.compaction_active = false;
+                self.update_phase(SessionPhase::Running);
+                self.cancelled |= cancelled;
+                if !cancelled {
+                    let command_error = CommandErrorView {
+                        code: "compaction_failed".into(),
+                        message: error.clone(),
+                    };
+                    self.failed = true;
+                    self.last_error = Some(command_error);
+                }
+                Some(ProgressEvent::CompactionFailed {
+                    compaction_id: id,
+                    trigger: trigger.into(),
+                    error,
+                    cancelled,
+                    history_changed,
                 })
             }
             AgentEvent::AssistantDelta(delta) => Some(ProgressEvent::AssistantDelta {
@@ -124,7 +194,7 @@ impl<'a> EventAdapter<'a> {
             } => Some(ProgressEvent::ToolUpdated {
                 tool_call_id: id,
                 name,
-                output: output.ui_text().to_string(),
+                output: crate::sdk::ToolOutputView::from(&output),
             }),
             AgentEvent::ToolCallFinished {
                 id,
@@ -134,7 +204,7 @@ impl<'a> EventAdapter<'a> {
             } => Some(ProgressEvent::ToolFinished {
                 tool_call_id: id,
                 name,
-                output: output.ui_text().to_string(),
+                output: crate::sdk::ToolOutputView::from(&output),
                 error: error.map(|error| CommandErrorView {
                     code: error.code.as_str().into(),
                     message: error.message,
@@ -254,7 +324,11 @@ impl<'a> EventAdapter<'a> {
                 self.remove_queued(&command_id);
                 None
             }
-            AgentEvent::SessionLoaded { .. } | AgentEvent::TurnFinished { .. } => None,
+            AgentEvent::TurnFinished { cancelled } => {
+                self.cancelled |= cancelled;
+                None
+            }
+            AgentEvent::SessionLoaded { .. } => None,
         };
         if let Some(progress) = progress {
             let _ = send_event(
@@ -412,5 +486,101 @@ mod tests {
         ));
         assert_eq!(events.len(), 4);
         assert_eq!(shared.snapshot().unwrap().phase, SessionPhase::Running);
+    }
+
+    #[test]
+    fn compaction_events_publish_correlated_phase_and_progress() {
+        let shared = shared();
+        let cancel = AtomicBool::new(false);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+        let mut revision = 0;
+        {
+            let mut adapter =
+                EventAdapter::new(Some("command"), &sender, &cancel, &shared, &mut revision);
+            adapter.emit(AgentEvent::CompactionStarted {
+                id: "compact-1".into(),
+                trigger: crate::event::CompactionTrigger::Automatic,
+                estimated_tokens: 128_000,
+                available_tokens: Some(151_000),
+            });
+            adapter.emit(AgentEvent::CompactionFinished {
+                id: "compact-1".into(),
+                trigger: crate::event::CompactionTrigger::Automatic,
+                tokens_before: 120_000,
+                summary_chars: 4_000,
+                retained_messages: 12,
+            });
+        }
+
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            &events[0],
+            SessionEvent::SessionSnapshot { snapshot }
+                if snapshot.phase == SessionPhase::Compacting && snapshot.revision == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            SessionEvent::Progress {
+                progress: ProgressEvent::CompactionStarted {
+                    compaction_id,
+                    trigger: crate::sdk::CompactionTriggerView::Automatic,
+                    estimated_tokens: 128_000,
+                    available_tokens: Some(151_000),
+                }
+            } if compaction_id == "compact-1"
+        ));
+        assert!(matches!(
+            &events[2],
+            SessionEvent::SessionSnapshot { snapshot }
+                if snapshot.phase == SessionPhase::Running && snapshot.revision == 2
+        ));
+        assert!(matches!(
+            &events[3],
+            SessionEvent::Progress {
+                progress: ProgressEvent::CompactionFinished {
+                    compaction_id,
+                    summary_chars: 4_000,
+                    retained_messages: 12,
+                    ..
+                }
+            } if compaction_id == "compact-1"
+        ));
+        assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn retry_inside_compaction_returns_to_compacting_phase() {
+        let shared = shared();
+        let cancel = AtomicBool::new(false);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(8);
+        let mut revision = 0;
+        {
+            let mut adapter =
+                EventAdapter::new(Some("command"), &sender, &cancel, &shared, &mut revision);
+            adapter.emit(AgentEvent::CompactionStarted {
+                id: "compact-1".into(),
+                trigger: crate::event::CompactionTrigger::Manual,
+                estimated_tokens: 100,
+                available_tokens: Some(200),
+            });
+            adapter.emit(AgentEvent::RetryScheduled {
+                attempt: 1,
+                max_retries: 3,
+                delay_ms: 10,
+                error: "temporary".into(),
+            });
+            adapter.emit(AgentEvent::RetryStarted {
+                attempt: 1,
+                max_retries: 3,
+            });
+        }
+
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            &events[4],
+            SessionEvent::SessionSnapshot { snapshot }
+                if snapshot.phase == SessionPhase::Compacting
+        ));
+        assert_eq!(shared.snapshot().unwrap().phase, SessionPhase::Compacting);
     }
 }

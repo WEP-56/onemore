@@ -55,6 +55,19 @@ export interface UsageView {
   cache_write_tokens: number | null;
 }
 
+export interface ToolMetadataView {
+  command: string | null;
+  cwd: string | null;
+  elapsed_ms: number | null;
+  exit_code: number | null;
+}
+
+export interface ToolOutputView {
+  content: string;
+  summary: string;
+  metadata: ToolMetadataView;
+}
+
 export interface QueuedInputView {
   command_id: string;
   text: string;
@@ -151,6 +164,7 @@ export interface SessionSummaryView {
 
 // ---- Events ----
 export type CommandStatus = "succeeded" | "failed" | "cancelled";
+export type CompactionTrigger = "automatic" | "manual";
 
 export interface CommandErrorView {
   code: string;
@@ -168,12 +182,15 @@ export type ProgressEvent =
   | { type: "run_started"; command_id: string }
   | { type: "retry_scheduled"; attempt: number; max_retries: number; delay_ms: number; error: string }
   | { type: "retry_started"; attempt: number; max_retries: number }
+  | { type: "compaction_started"; compaction_id: string; trigger: CompactionTrigger; estimated_tokens: number; available_tokens: number | null }
+  | { type: "compaction_finished"; compaction_id: string; trigger: CompactionTrigger; tokens_before: number; summary_chars: number; retained_messages: number }
+  | { type: "compaction_failed"; compaction_id: string; trigger: CompactionTrigger; error: string; cancelled: boolean; history_changed: boolean }
   | { type: "assistant_delta"; message_id: string; content_index: number; kind: string; delta: string }
   | { type: "assistant_finished"; message_id: string; text: string }
   | { type: "tool_call_pending"; name: string }
   | { type: "tool_started"; tool_call_id: string; name: string; summary: string }
-  | { type: "tool_updated"; tool_call_id: string; name: string; output: string }
-  | { type: "tool_finished"; tool_call_id: string; name: string; output: string; error: CommandErrorView | null }
+  | { type: "tool_updated"; tool_call_id: string; name: string; output: ToolOutputView }
+  | { type: "tool_finished"; tool_call_id: string; name: string; output: ToolOutputView; error: CommandErrorView | null }
   | { type: "approval_requested"; request: ApprovalRequestView }
   | { type: "approval_resolved"; request_id: string; allowed: boolean }
   | { type: "notice"; level: NoticeLevel; text: string }

@@ -94,7 +94,7 @@ api_key = "test-key"
         }
     });
 
-    send(&mut stdin, json!({"type": "hello", "version": 1}));
+    send(&mut stdin, json!({"type": "hello", "version": 3}));
     let hello = recv_frame(&line_rx);
     assert_eq!(hello["type"], "hello");
     send(

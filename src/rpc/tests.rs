@@ -237,7 +237,7 @@ fn prompt_events_snapshot_and_protocol_errors_share_one_jsonl_stream() {
         ToolRegistry::new(Vec::new()),
     );
     let (input, bytes, join) = start_server(agent);
-    send(&input, json!({"type": "hello", "version": 1}));
+    send(&input, json!({"type": "hello", "version": 3}));
     wait_for(&bytes, |frames| {
         frames.iter().any(|frame| frame["type"] == "hello")
     });
@@ -335,7 +335,7 @@ fn active_second_prompt_is_rejected_by_runtime_admission() {
         ToolRegistry::new(Vec::new()),
     );
     let (input, bytes, join) = start_server(agent);
-    send(&input, json!({"type": "hello", "version": 1}));
+    send(&input, json!({"type": "hello", "version": 3}));
     wait_for(&bytes, |frames| !frames.is_empty());
     send(
         &input,
@@ -367,7 +367,7 @@ fn approval_roundtrip_is_correlated_and_duplicate_response_fails_closed() {
         ToolRegistry::new(vec![Box::new(ApprovalTool)]),
     );
     let (input, bytes, join) = start_server(agent);
-    send(&input, json!({"type": "hello", "version": 1}));
+    send(&input, json!({"type": "hello", "version": 3}));
     wait_for(&bytes, |frames| !frames.is_empty());
     send(
         &input,
@@ -418,6 +418,9 @@ fn approval_roundtrip_is_correlated_and_duplicate_response_fails_closed() {
     assert!(current.iter().any(|frame| {
         frame.pointer("/event/progress/type") == Some(&json!("tool_finished"))
             && frame.pointer("/event/progress/error") == Some(&Value::Null)
+            && frame.pointer("/event/progress/output/content") == Some(&json!("approved"))
+            && frame.pointer("/event/progress/output/summary") == Some(&json!("approved"))
+            && frame.pointer("/event/progress/output/metadata/command") == Some(&Value::Null)
     }));
     shutdown(input, &bytes, join);
 }
@@ -426,7 +429,7 @@ fn approval_roundtrip_is_correlated_and_duplicate_response_fails_closed() {
 fn version_mismatch_eof_and_broken_pipe_terminate_the_server() {
     let wrong = test_agent(Vec::new(), ToolRegistry::new(Vec::new()));
     let (input, bytes, join) = start_server(wrong);
-    send(&input, json!({"type": "hello", "version": 2}));
+    send(&input, json!({"type": "hello", "version": 1}));
     join.join().unwrap().unwrap();
     assert!(frames(&bytes).iter().any(|frame| {
         frame["type"] == "hello_error"
@@ -444,7 +447,7 @@ fn version_mismatch_eof_and_broken_pipe_terminate_the_server() {
         ToolRegistry::new(Vec::new()),
     );
     let (input, bytes, join) = start_server(eof_agent);
-    send(&input, json!({"type": "hello", "version": 1}));
+    send(&input, json!({"type": "hello", "version": 3}));
     wait_for(&bytes, |frames| !frames.is_empty());
     send(
         &input,
@@ -484,7 +487,7 @@ fn version_mismatch_eof_and_broken_pipe_terminate_the_server() {
 
     let broken_agent = test_agent(Vec::new(), ToolRegistry::new(Vec::new()));
     let (input_tx, input_rx) = std::sync::mpsc::sync_channel(1);
-    send(&input_tx, json!({"type": "hello", "version": 1}));
+    send(&input_tx, json!({"type": "hello", "version": 3}));
     let error = serve(broken_agent, input_rx, &mut BrokenWriter).unwrap_err();
     assert!(format!("{error:#}").contains("client closed"));
 }

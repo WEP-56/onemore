@@ -149,6 +149,57 @@ fn run_once(agent: Agent, prompt: String) -> Result<()> {
         match session.events.recv()? {
             SessionEvent::Progress { progress } => match progress {
                 ProgressEvent::UserMessage { text } => eprintln!("❯ {}", text),
+                ProgressEvent::CompactionStarted {
+                    trigger,
+                    estimated_tokens,
+                    available_tokens,
+                    ..
+                } => {
+                    let source = match trigger {
+                        onemore::sdk::CompactionTriggerView::Automatic => "自动",
+                        onemore::sdk::CompactionTriggerView::Manual => "手动",
+                    };
+                    match available_tokens {
+                        Some(available) => eprintln!(
+                            "◐ 正在{}压缩历史(约 {} / {} tokens)",
+                            source,
+                            onemore::util::fmt_tokens(estimated_tokens),
+                            onemore::util::fmt_tokens(available)
+                        ),
+                        None => eprintln!(
+                            "◐ 正在{}压缩历史(约 {} tokens)",
+                            source,
+                            onemore::util::fmt_tokens(estimated_tokens)
+                        ),
+                    }
+                }
+                ProgressEvent::CompactionFinished {
+                    tokens_before,
+                    summary_chars,
+                    retained_messages,
+                    ..
+                } => eprintln!(
+                    "✓ 压缩完成:压缩前约 {} tokens,摘要 {} 字符,保留 {} 条消息",
+                    onemore::util::fmt_tokens(tokens_before),
+                    summary_chars,
+                    retained_messages
+                ),
+                ProgressEvent::CompactionFailed {
+                    error,
+                    cancelled,
+                    history_changed,
+                    ..
+                } => eprintln!(
+                    "{} 压缩{}:{}({})",
+                    if cancelled { "■" } else { "✖" },
+                    if cancelled { "已取消" } else { "失败" },
+                    error,
+                    if history_changed {
+                        "历史已改变"
+                    } else {
+                        "历史未改变"
+                    }
+                ),
                 ProgressEvent::AssistantDelta { kind, delta, .. } if kind == "text" => {
                     streamed = true;
                     print!("{}", delta);
@@ -163,10 +214,10 @@ fn run_once(agent: Agent, prompt: String) -> Result<()> {
                     eprintln!("● {}({})", name, summary);
                 }
                 ProgressEvent::ToolUpdated { output, .. } => {
-                    eprintln!("  … {}", onemore::util::ellipsis(&output, 120));
+                    eprintln!("  … {}", onemore::util::ellipsis(&output.summary, 120));
                 }
                 ProgressEvent::ToolFinished { output, error, .. } => {
-                    let shown = output.as_str();
+                    let shown = output.content.as_str();
                     let first = shown.lines().next().unwrap_or("");
                     let more = shown.lines().count().saturating_sub(1);
                     eprintln!(

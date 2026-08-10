@@ -123,6 +123,7 @@ fn run_worker(
             Some(&command_rx),
         );
         let failed = adapter.failed();
+        let cancelled = adapter.cancelled();
         let last_error = adapter.last_error().cloned();
         drop(adapter);
 
@@ -138,7 +139,7 @@ fn run_worker(
         }
 
         if let Some(command_id) = command_id {
-            let status = command_status(report.run.as_ref(), failed);
+            let status = command_status(report.run.as_ref(), failed, cancelled);
             let error = (status == CommandStatus::Failed).then_some(
                 last_error.clone().unwrap_or_else(|| CommandErrorView {
                     code: "agent_error".into(),
@@ -279,10 +280,15 @@ fn command_phase(command: &AgentCommand) -> SessionPhase {
     }
 }
 
-fn command_status(run: Option<&super::agent_loop::RunReport>, failed: bool) -> CommandStatus {
+fn command_status(
+    run: Option<&super::agent_loop::RunReport>,
+    failed: bool,
+    cancelled: bool,
+) -> CommandStatus {
     match run {
         Some(run) if run.cancelled => CommandStatus::Cancelled,
         Some(run) if run.failed || failed => CommandStatus::Failed,
+        None if cancelled => CommandStatus::Cancelled,
         _ if failed => CommandStatus::Failed,
         _ => CommandStatus::Succeeded,
     }

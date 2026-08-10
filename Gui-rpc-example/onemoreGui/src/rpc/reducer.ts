@@ -182,6 +182,8 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
         name: p.name,
         summary: p.summary,
         output: "",
+        outputSummary: "",
+        metadata: { command: null, cwd: null, elapsed_ms: null, exit_code: null },
         status: "started",
         error: null,
         sealed: false,
@@ -195,16 +197,16 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
       const prev = state.liveTools[p.tool_call_id];
       const timestamp = now();
       const tool: LiveTool = prev
-        ? { ...prev, output: p.output, status: "updated", updatedAt: timestamp }
-        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "updated", error: null, sealed: false, createdAt: timestamp, updatedAt: timestamp };
+        ? { ...prev, output: p.output.content, outputSummary: p.output.summary, metadata: p.output.metadata, status: "updated", updatedAt: timestamp }
+        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output.content, outputSummary: p.output.summary, metadata: p.output.metadata, status: "updated", error: null, sealed: false, createdAt: timestamp, updatedAt: timestamp };
       return { ...state, liveTools: { ...state.liveTools, [p.tool_call_id]: tool } };
     }
     case "tool_finished": {
       const prev = state.liveTools[p.tool_call_id];
       const timestamp = now();
       const tool: LiveTool = prev
-        ? { ...prev, output: p.output, status: "finished", sealed: true, error: p.error?.message ?? null, updatedAt: timestamp }
-        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "finished", error: p.error?.message ?? null, sealed: true, createdAt: timestamp, updatedAt: timestamp };
+        ? { ...prev, output: p.output.content, outputSummary: p.output.summary, metadata: p.output.metadata, status: "finished", sealed: true, error: p.error?.message ?? null, updatedAt: timestamp }
+        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output.content, outputSummary: p.output.summary, metadata: p.output.metadata, status: "finished", error: p.error?.message ?? null, sealed: true, createdAt: timestamp, updatedAt: timestamp };
       const metrics = { ...state.metrics, toolsFinished: state.metrics.toolsFinished + 1 };
       return { ...state, metrics, liveTools: { ...state.liveTools, [p.tool_call_id]: tool } };
     }

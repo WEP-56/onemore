@@ -25,6 +25,7 @@
 mod command;
 mod input;
 mod picker;
+mod tool_log;
 mod transcript;
 
 #[cfg(test)]
@@ -55,29 +56,33 @@ use crate::message::{Block as MessageBlock, ChatMessage, Role};
 use crate::permission::{ApprovalDecision, ApprovalRequest, ApprovalResponse, ApprovalScope};
 #[cfg(test)]
 use crate::plan::reduce_plan;
-use crate::plan::PlanItem;
+use crate::plan::{PlanItem, PlanSnapshot, PlanStatus};
 use crate::sdk::{
-    AgentSession, ProgressEvent, SessionController, SessionEvent, SessionEvents, SessionPhase,
-    SkillMetadataView, TranscriptItem,
+    AgentSession, CompactionTriggerView, ProgressEvent, SessionController, SessionEvent,
+    SessionEvents, SessionPhase, SkillMetadataView, TranscriptItem,
 };
 #[cfg(test)]
 use crate::session::{SessionEntry, SessionEntryPayload};
 use crate::util;
 use input::InputBox;
 use picker::{Picker, PickerItem};
+use tool_log::{ToolLog, ToolRecord, ToolRunStatus};
 use transcript::Transcript;
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// 输入区内容最多显示的行数(超出滚动)。
 const INPUT_MAX_ROWS: usize = 6;
 /// Inline viewport 只承载 live 内容和 composer；已完成消息在原生 scrollback 中。
-const INLINE_VIEWPORT_ROWS: u16 = 8;
+/// 小窗口保持紧凑，大窗口给流式思考、正文和工具状态更多可见空间。
+const MIN_INLINE_VIEWPORT_ROWS: u16 = 8;
+const MAX_INLINE_VIEWPORT_ROWS: u16 = 16;
 const HELP_TEXT: &str = "斜杠命令\n\
   /model             选择当前 provider 的模型与思考程度\n\
   /reasoning         调整当前模型的思考程度\n\
   /provider          选择 provider(对话历史保留)\n\
   /session [ID|all]  列出或恢复历史会话；all 显示其他 workspace\n\
   /skill [名称]       选择并加载一个本地技能\n\
+  /tools [调用 ID]   浏览工具调用，或按 ID 打开完整输出\n\
   /compact           压缩历史(摘要替代模型视图,事实保留)\n\
   /queue <内容>      排队后续任务(当前任务结束后执行)\n\
   /clear             清空会话\n\
@@ -85,7 +90,7 @@ const HELP_TEXT: &str = "斜杠命令\n\
 \n\
 运行中输入并回车 = steering:在当前一批工具完成后注入,修正方向;Esc 取消当前轮\n\
 编辑: Ctrl+A/E 行首/行尾 · Ctrl+W 删前一词 · Ctrl+K 删到行尾 · Alt+←/→ 按词移动\n\
-操作: ↑/↓ 浏览候选或历史 · Tab 补全 · Esc 关闭/取消 · 滚轮浏览终端历史 · 鼠标拖动选择文本";
+操作: ↑/↓ 浏览候选或历史 · Tab 补全 · Ctrl+T 最近工具 · Alt+P 计划 · Esc 关闭/取消 · 滚轮浏览终端历史 · 鼠标拖动选择文本";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
@@ -110,6 +115,13 @@ enum Overlay {
         request: ApprovalRequest,
         selected: usize,
     },
+    ToolList {
+        selected: usize,
+    },
+    ToolDetail {
+        tool_call_id: String,
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +139,7 @@ struct PendingReasoningSelection {
 
 pub fn run(session: AgentSession) -> anyhow::Result<()> {
     let (_, terminal_rows) = ratatui::crossterm::terminal::size()?;
-    let viewport_height = INLINE_VIEWPORT_ROWS.min(terminal_rows.max(1));
+    let viewport_height = inline_viewport_rows(terminal_rows);
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Inline(viewport_height),
     })?;
@@ -145,6 +157,28 @@ pub fn run(session: AgentSession) -> anyhow::Result<()> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+fn inline_viewport_rows(terminal_rows: u16) -> u16 {
+    (terminal_rows / 2)
+        .clamp(MIN_INLINE_VIEWPORT_ROWS, MAX_INLINE_VIEWPORT_ROWS)
+        .min(terminal_rows.max(1))
+}
+
+fn plan_snapshot_from_view(plan: crate::sdk::PlanView) -> PlanSnapshot {
+    PlanSnapshot {
+        revision: plan.revision,
+        items: plan
+            .items
+            .into_iter()
+            .map(|item| PlanItem {
+                id: item.id,
+                text: item.text,
+                status: item.status,
+            })
+            .collect(),
+        explanation: plan.explanation,
+    }
 }
 
 trait UiRuntime {
@@ -214,6 +248,7 @@ struct App {
     history_draft: String,
 
     busy: bool,
+    compaction_active: bool,
     status_note: String,
     provider_label: String,
     active_selection: ActiveModelSelection,
@@ -223,6 +258,11 @@ struct App {
     pending_reasoning: Option<PendingReasoningSelection>,
     session_id: String,
     usage: Usage,
+    current_plan: PlanSnapshot,
+    plan_collapsed: bool,
+    tool_log: ToolLog,
+    tool_detail_max_scroll: usize,
+    last_overlay_height: u16,
     scroll_up: usize,
     last_transcript_height: u16,
 
@@ -237,12 +277,13 @@ impl App {
     fn from_session(session: AgentSession) -> anyhow::Result<App> {
         let snapshot = session.controller.snapshot()?;
         let ui = session.controller.ui_metadata();
+        let current_plan = plan_snapshot_from_view(snapshot.plan);
         let active_selection = ActiveModelSelection {
             provider: snapshot.model.provider,
             model: snapshot.model.model,
             effort: snapshot.model.effort,
         };
-        Ok(App::new(
+        let mut app = App::new(
             Box::new(session.controller),
             Some(session.events),
             snapshot.model.label,
@@ -250,7 +291,11 @@ impl App {
             ui.provider_catalog,
             ui.reasoning_preferences,
             snapshot.session_id,
-        ))
+        );
+        app.tool_log.restore(&snapshot.transcript);
+        app.restore_snapshot_transcript(&snapshot.transcript);
+        app.current_plan = current_plan;
+        Ok(app)
     }
 
     fn new(
@@ -275,6 +320,7 @@ impl App {
             history_idx: None,
             history_draft: String::new(),
             busy: false,
+            compaction_active: false,
             status_note: String::new(),
             provider_label,
             active_selection,
@@ -284,6 +330,11 @@ impl App {
             pending_reasoning: None,
             session_id,
             usage: Usage::default(),
+            current_plan: PlanSnapshot::default(),
+            plan_collapsed: false,
+            tool_log: ToolLog::default(),
+            tool_detail_max_scroll: 0,
+            last_overlay_height: 1,
             scroll_up: 0,
             last_transcript_height: 20,
             spinner_frame: 0,
@@ -384,7 +435,10 @@ impl App {
                             picker.push_filter(c);
                         }
                     }
-                    Some(Overlay::Loading { .. }) | Some(Overlay::Approval { .. }) => {}
+                    Some(Overlay::Loading { .. })
+                    | Some(Overlay::Approval { .. })
+                    | Some(Overlay::ToolList { .. })
+                    | Some(Overlay::ToolDetail { .. }) => {}
                     None => {
                         self.input.insert_str(&s);
                         self.on_input_changed();
@@ -425,7 +479,13 @@ impl App {
                         }),
                     },
                 };
+                self.current_plan = plan_snapshot_from_view(snapshot.plan);
                 self.busy = snapshot.phase != SessionPhase::Idle;
+                match snapshot.phase {
+                    SessionPhase::Compacting => self.compaction_active = true,
+                    SessionPhase::Retrying => {}
+                    _ => self.compaction_active = false,
+                }
                 self.status_note = match snapshot.phase {
                     SessionPhase::Idle => String::new(),
                     SessionPhase::Running => "思考中".into(),
@@ -435,6 +495,7 @@ impl App {
                     SessionPhase::ShuttingDown => "退出中".into(),
                 };
                 if session_changed {
+                    self.tool_log.restore(&snapshot.transcript);
                     self.restore_snapshot_transcript(&snapshot.transcript);
                     self.scroll_up = 0;
                 }
@@ -447,6 +508,7 @@ impl App {
             }
             SessionEvent::Settled { .. } => {
                 self.busy = false;
+                self.compaction_active = false;
                 self.status_note.clear();
                 self.transcript.close_open_cells();
             }
@@ -466,12 +528,21 @@ impl App {
                 delay_ms,
                 error,
             } => {
-                self.status_note = format!(
-                    "重试 {}/{}，等待 {:.1}s",
-                    attempt,
-                    max_retries,
-                    delay_ms as f64 / 1000.0
-                );
+                self.status_note = if self.compaction_active {
+                    format!(
+                        "压缩重试 {}/{}，等待 {:.1}s",
+                        attempt,
+                        max_retries,
+                        delay_ms as f64 / 1000.0
+                    )
+                } else {
+                    format!(
+                        "重试 {}/{}，等待 {:.1}s",
+                        attempt,
+                        max_retries,
+                        delay_ms as f64 / 1000.0
+                    )
+                };
                 self.transcript.push_notice(format!(
                     "{}，{:.1}s 后重试({}/{})",
                     error,
@@ -480,7 +551,67 @@ impl App {
                     max_retries
                 ));
             }
-            ProgressEvent::RetryStarted { .. } => self.status_note = "正在重新连接模型".into(),
+            ProgressEvent::RetryStarted { .. } => {
+                self.status_note = if self.compaction_active {
+                    "正在继续压缩历史".into()
+                } else {
+                    "正在重新连接模型".into()
+                }
+            }
+            ProgressEvent::CompactionStarted {
+                compaction_id,
+                trigger,
+                estimated_tokens,
+                available_tokens,
+            } => {
+                self.busy = true;
+                self.compaction_active = true;
+                self.status_note = match trigger {
+                    CompactionTriggerView::Automatic => "正在自动压缩历史".into(),
+                    CompactionTriggerView::Manual => "正在手动压缩历史".into(),
+                };
+                self.transcript.start_compaction(
+                    compaction_id,
+                    trigger == CompactionTriggerView::Automatic,
+                    estimated_tokens,
+                    available_tokens,
+                );
+            }
+            ProgressEvent::CompactionFinished {
+                compaction_id,
+                trigger,
+                tokens_before,
+                summary_chars,
+                retained_messages,
+            } => {
+                self.compaction_active = false;
+                self.status_note = match trigger {
+                    CompactionTriggerView::Automatic => "压缩完成，继续思考".into(),
+                    CompactionTriggerView::Manual => "压缩完成".into(),
+                };
+                self.transcript.finish_compaction(
+                    &compaction_id,
+                    tokens_before,
+                    summary_chars,
+                    retained_messages,
+                );
+            }
+            ProgressEvent::CompactionFailed {
+                compaction_id,
+                error,
+                cancelled,
+                history_changed,
+                ..
+            } => {
+                self.compaction_active = false;
+                self.status_note = if cancelled {
+                    "压缩已取消".into()
+                } else {
+                    "压缩失败".into()
+                };
+                self.transcript
+                    .fail_compaction(&compaction_id, error, cancelled, history_changed);
+            }
             ProgressEvent::AssistantDelta { kind, delta, .. } if kind == "thinking" => {
                 self.transcript.append_thinking(&delta)
             }
@@ -497,20 +628,31 @@ impl App {
                 summary,
             } => {
                 self.status_note = format!("执行 {}", name);
+                self.tool_log
+                    .start(tool_call_id.clone(), name.clone(), summary.clone());
                 self.transcript.push_tool(tool_call_id, name, summary);
             }
-            ProgressEvent::ToolUpdated { output, .. } => {
-                self.status_note = format!("工具进度: {}", output)
+            ProgressEvent::ToolUpdated {
+                tool_call_id,
+                name,
+                output,
+            } => {
+                self.status_note = format!("工具进度: {}", output.summary);
+                self.transcript
+                    .update_tool(&tool_call_id, output.summary.clone());
+                self.tool_log.update(tool_call_id, name, output);
             }
             ProgressEvent::ToolFinished {
                 tool_call_id,
+                name,
                 output,
                 error,
-                ..
             } => {
                 self.status_note = "思考中".into();
                 self.transcript
-                    .finish_tool(&tool_call_id, output, error.is_some());
+                    .finish_tool(&tool_call_id, output.content.clone(), error.is_some());
+                self.tool_log
+                    .finish(tool_call_id, name, output, error.as_ref());
             }
             ProgressEvent::ApprovalRequested { request } => {
                 self.status_note = format!("等待审批: {}", request.tool);
@@ -560,18 +702,15 @@ impl App {
                 }
                 self.transcript.push_error(error.message);
             }
-            ProgressEvent::PlanUpdated { plan } => self.transcript.push_plan(
-                plan.revision,
-                plan.items
-                    .into_iter()
-                    .map(|item| PlanItem {
-                        id: item.id,
-                        text: item.text,
-                        status: item.status,
-                    })
-                    .collect(),
-                plan.explanation,
-            ),
+            ProgressEvent::PlanUpdated { plan } => {
+                let plan = plan_snapshot_from_view(plan);
+                self.transcript.push_plan(
+                    plan.revision,
+                    plan.items.clone(),
+                    plan.explanation.clone(),
+                );
+                self.current_plan = plan;
+            }
             ProgressEvent::SkillsDiscovered { skills, warnings } => {
                 self.skills = skills.clone();
                 self.status_note = format!("已发现 {} 个技能", skills.len());
@@ -599,7 +738,15 @@ impl App {
             }
             ProgressEvent::ConversationCleared => {
                 self.transcript.clear();
+                self.tool_log.clear();
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::ToolList { .. } | Overlay::ToolDetail { .. })
+                ) {
+                    self.overlay = None;
+                }
                 self.usage = Usage::default();
+                self.current_plan = PlanSnapshot::default();
                 self.transcript.push_notice("会话已清空".into());
             }
             ProgressEvent::ModelSelectionChanged { selection } => {
@@ -751,12 +898,21 @@ impl App {
                 delay_ms,
                 error,
             } => {
-                self.status_note = format!(
-                    "重试 {}/{}，等待 {:.1}s",
-                    attempt,
-                    max_retries,
-                    delay_ms as f64 / 1000.0
-                );
+                self.status_note = if self.compaction_active {
+                    format!(
+                        "压缩重试 {}/{}，等待 {:.1}s",
+                        attempt,
+                        max_retries,
+                        delay_ms as f64 / 1000.0
+                    )
+                } else {
+                    format!(
+                        "重试 {}/{}，等待 {:.1}s",
+                        attempt,
+                        max_retries,
+                        delay_ms as f64 / 1000.0
+                    )
+                };
                 self.transcript.push_notice(format!(
                     "{}，{:.1}s 后重试({}/{})",
                     error,
@@ -765,7 +921,67 @@ impl App {
                     max_retries
                 ));
             }
-            AgentEvent::RetryStarted { .. } => self.status_note = "正在重新连接模型".into(),
+            AgentEvent::RetryStarted { .. } => {
+                self.status_note = if self.compaction_active {
+                    "正在继续压缩历史".into()
+                } else {
+                    "正在重新连接模型".into()
+                }
+            }
+            AgentEvent::CompactionStarted {
+                id,
+                trigger,
+                estimated_tokens,
+                available_tokens,
+            } => {
+                self.busy = true;
+                self.compaction_active = true;
+                self.status_note = match trigger {
+                    crate::event::CompactionTrigger::Automatic => "正在自动压缩历史".into(),
+                    crate::event::CompactionTrigger::Manual => "正在手动压缩历史".into(),
+                };
+                self.transcript.start_compaction(
+                    id,
+                    trigger == crate::event::CompactionTrigger::Automatic,
+                    estimated_tokens,
+                    available_tokens,
+                );
+            }
+            AgentEvent::CompactionFinished {
+                id,
+                trigger,
+                tokens_before,
+                summary_chars,
+                retained_messages,
+            } => {
+                self.compaction_active = false;
+                self.status_note = match trigger {
+                    crate::event::CompactionTrigger::Automatic => "压缩完成，继续思考".into(),
+                    crate::event::CompactionTrigger::Manual => "压缩完成".into(),
+                };
+                self.transcript.finish_compaction(
+                    &id,
+                    tokens_before,
+                    summary_chars,
+                    retained_messages,
+                );
+            }
+            AgentEvent::CompactionFailed {
+                id,
+                error,
+                cancelled,
+                history_changed,
+                ..
+            } => {
+                self.compaction_active = false;
+                self.status_note = if cancelled {
+                    "压缩已取消".into()
+                } else {
+                    "压缩失败".into()
+                };
+                self.transcript
+                    .fail_compaction(&id, error, cancelled, history_changed);
+            }
             AgentEvent::AssistantDelta(t) => self.transcript.append_assistant(&t),
             AgentEvent::ThinkingDelta(t) => self.transcript.append_thinking(&t),
             AgentEvent::AssistantMessage(full) => self.transcript.finalize_assistant(full),
@@ -774,23 +990,50 @@ impl App {
             }
             AgentEvent::ToolCallStarted { id, name, summary } => {
                 self.status_note = format!("执行 {}", name);
+                self.tool_log
+                    .start(id.clone(), name.clone(), summary.clone());
                 self.transcript.push_tool(id, name, summary);
             }
-            AgentEvent::ToolCallUpdated { output, .. } => {
+            AgentEvent::ToolCallUpdated { id, name, output } => {
                 self.status_note = format!("工具进度: {}", output.ui_text());
+                self.transcript
+                    .update_tool(&id, output.ui_text().to_string());
+                self.tool_log
+                    .update(id, name, crate::sdk::ToolOutputView::from(&output));
             }
             AgentEvent::ToolCallFinished {
-                id, output, error, ..
+                id,
+                name,
+                output,
+                error,
             } => {
                 self.status_note = "思考中".into();
                 self.transcript
-                    .finish_tool(&id, output.ui_text().to_string(), error.is_some());
+                    .finish_tool(&id, output.model_text.clone(), error.is_some());
+                let error_view = error.as_ref().map(|error| crate::sdk::CommandErrorView {
+                    code: error.code.as_str().into(),
+                    message: error.message.clone(),
+                });
+                self.tool_log.finish(
+                    id,
+                    name,
+                    crate::sdk::ToolOutputView::from(&output),
+                    error_view.as_ref(),
+                );
             }
             AgentEvent::PlanUpdated {
                 revision,
                 items,
                 explanation,
-            } => self.transcript.push_plan(revision, items, explanation),
+            } => {
+                self.transcript
+                    .push_plan(revision, items.clone(), explanation.clone());
+                self.current_plan = PlanSnapshot {
+                    revision,
+                    items,
+                    explanation,
+                };
+            }
             AgentEvent::SkillsDiscovered { skills, warnings } => {
                 self.skills = skills
                     .iter()
@@ -856,6 +1099,7 @@ impl App {
             }
             AgentEvent::ConversationCleared => {
                 self.transcript.clear();
+                self.tool_log.clear();
                 self.usage = Usage::default();
                 self.transcript.push_notice("会话已清空".into());
             }
@@ -992,6 +1236,8 @@ impl App {
             .collect();
 
         self.transcript.clear();
+        self.tool_log.clear();
+        self.current_plan = plan.snapshot.clone();
         for entry in entries {
             match &entry.payload {
                 SessionEntryPayload::Message(record) => {
@@ -1048,6 +1294,11 @@ impl App {
                             self.transcript.append_thinking(text);
                         }
                         MessageBlock::ToolUse { id, name, input } => {
+                            self.tool_log.start(
+                                id.clone(),
+                                name.clone(),
+                                util::args_summary(input),
+                            );
                             self.transcript.push_tool(
                                 id.clone(),
                                 name.clone(),
@@ -1058,6 +1309,25 @@ impl App {
                                     id,
                                     util::truncate_middle(output, 4000),
                                     *is_error,
+                                );
+                                let view = crate::sdk::ToolOutputView {
+                                    content: util::truncate_middle(output, 4000),
+                                    summary: String::new(),
+                                    metadata: crate::sdk::ToolMetadataView::default(),
+                                };
+                                let error = if *is_error {
+                                    Some(crate::sdk::CommandErrorView {
+                                        code: "tool_error".into(),
+                                        message: view.content.clone(),
+                                    })
+                                } else {
+                                    None
+                                };
+                                self.tool_log.finish(
+                                    id.clone(),
+                                    name.clone(),
+                                    view,
+                                    error.as_ref(),
                                 );
                             }
                         }
@@ -1080,8 +1350,23 @@ impl App {
         let slash_open = !self.slash_matches().is_empty();
         match code {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.on_ctrl_c(),
+            KeyCode::Char('t') if mods.contains(KeyModifiers::CONTROL) => {
+                if let Some(record) = self.tool_log.recent(0) {
+                    self.overlay = Some(Overlay::ToolDetail {
+                        tool_call_id: record.id.clone(),
+                        scroll: 0,
+                    });
+                } else {
+                    self.transcript.push_notice("当前会话还没有工具调用".into());
+                }
+            }
             KeyCode::Char('l') if mods.contains(KeyModifiers::CONTROL) => {
                 self.force_clear = true;
+            }
+            KeyCode::Char('p') if mods.contains(KeyModifiers::ALT) => {
+                if self.current_plan.revision > 0 && !self.current_plan.items.is_empty() {
+                    self.plan_collapsed = !self.plan_collapsed;
+                }
             }
             KeyCode::Char('a') if mods.contains(KeyModifiers::CONTROL) => self.input.move_start(),
             KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => self.input.move_end_all(),
@@ -1258,6 +1543,8 @@ impl App {
         let mut accept_picker = false;
         let mut close = false;
         let mut approval: Option<ApprovalResponse> = None;
+        let mut open_tool: Option<String> = None;
+        let mut show_tool_list = false;
         match self.overlay.as_mut().expect("overlay checked above") {
             Overlay::Picker { picker, .. } => match code {
                 KeyCode::Esc => close = true,
@@ -1323,12 +1610,56 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::ToolList { selected } => match code {
+                KeyCode::Esc => close = true,
+                KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => close = true,
+                KeyCode::Char('t') if mods.contains(KeyModifiers::CONTROL) => close = true,
+                KeyCode::Up | KeyCode::BackTab => *selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Tab => {
+                    *selected = (*selected + 1).min(self.tool_log.len().saturating_sub(1));
+                }
+                KeyCode::Home => *selected = 0,
+                KeyCode::End => *selected = self.tool_log.len().saturating_sub(1),
+                KeyCode::Enter => {
+                    open_tool = self
+                        .tool_log
+                        .recent(*selected)
+                        .map(|record| record.id.clone());
+                }
+                _ => {}
+            },
+            Overlay::ToolDetail { scroll, .. } => match code {
+                KeyCode::Esc => close = true,
+                KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => close = true,
+                KeyCode::Char('t') if mods.contains(KeyModifiers::CONTROL) => close = true,
+                KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down => *scroll = (*scroll + 1).min(self.tool_detail_max_scroll),
+                KeyCode::PageUp => {
+                    *scroll = scroll.saturating_sub(self.last_overlay_height.max(1) as usize);
+                }
+                KeyCode::PageDown => {
+                    *scroll = scroll
+                        .saturating_add(self.last_overlay_height.max(1) as usize)
+                        .min(self.tool_detail_max_scroll);
+                }
+                KeyCode::Home => *scroll = 0,
+                KeyCode::End => *scroll = self.tool_detail_max_scroll,
+                KeyCode::Backspace => show_tool_list = true,
+                _ => {}
+            },
         }
         if let Some(response) = approval {
             self.runtime.approve(response);
             self.overlay = None;
         } else if accept_picker {
             self.accept_picker();
+        } else if let Some(tool_call_id) = open_tool {
+            self.overlay = Some(Overlay::ToolDetail {
+                tool_call_id,
+                scroll: 0,
+            });
+        } else if show_tool_list {
+            self.overlay = Some(Overlay::ToolList { selected: 0 });
         } else if close {
             self.overlay = None;
             self.pending_reasoning = None;
@@ -1524,6 +1855,7 @@ impl App {
                     self.submit_skill(rest.to_string());
                 }
             }
+            command::SlashCommand::Tools => self.open_tools(rest),
             command::SlashCommand::Provider => {
                 if rest.is_empty() {
                     self.open_provider_picker();
@@ -1546,6 +1878,26 @@ impl App {
                     self.set_reasoning_from_args(rest);
                 }
             }
+        }
+    }
+
+    fn open_tools(&mut self, query: &str) {
+        if self.tool_log.is_empty() {
+            self.transcript.push_notice("当前会话还没有工具调用".into());
+            return;
+        }
+        if query.is_empty() {
+            self.overlay = Some(Overlay::ToolList { selected: 0 });
+            return;
+        }
+        if let Some(tool_call_id) = self.tool_log.find_id(query) {
+            self.overlay = Some(Overlay::ToolDetail {
+                tool_call_id,
+                scroll: 0,
+            });
+        } else {
+            self.transcript
+                .push_error(format!("没有匹配 {:?} 的工具调用", query));
         }
     }
 
@@ -1798,11 +2150,33 @@ impl App {
             return;
         }
 
+        if let Some(Overlay::ToolList { selected }) = self.overlay.as_ref() {
+            self.last_overlay_height = area.height.saturating_sub(3).max(1);
+            draw_tool_list(frame, area, &self.tool_log, *selected);
+            return;
+        }
+        if let Some(Overlay::ToolDetail {
+            tool_call_id,
+            scroll,
+        }) = self.overlay.as_ref()
+        {
+            let tool_call_id = tool_call_id.clone();
+            let scroll = *scroll;
+            self.last_overlay_height = area.height.saturating_sub(3).max(1);
+            self.tool_detail_max_scroll =
+                draw_tool_detail(frame, area, self.tool_log.get(&tool_call_id), scroll);
+            if let Some(Overlay::ToolDetail { scroll, .. }) = self.overlay.as_mut() {
+                *scroll = (*scroll).min(self.tool_detail_max_scroll);
+            }
+            return;
+        }
+
         if self.overlay.is_some() {
             let bottom_h = match &self.overlay {
                 Some(Overlay::Picker { picker, .. }) => picker.preferred_height(),
                 Some(Overlay::Loading { .. }) => 5,
                 Some(Overlay::Approval { .. }) => 8,
+                Some(Overlay::ToolList { .. } | Overlay::ToolDetail { .. }) => 0,
                 None => 0,
             }
             .min(area.height.saturating_sub(2));
@@ -1815,6 +2189,7 @@ impl App {
                 Some(Overlay::Approval { request, selected }) => {
                     draw_approval(frame, overlay_area, request, *selected)
                 }
+                Some(Overlay::ToolList { .. } | Overlay::ToolDetail { .. }) => {}
                 None => {}
             }
             return;
@@ -1826,8 +2201,12 @@ impl App {
         let input_h = (iv.total_rows.clamp(1, INPUT_MAX_ROWS) as u16) + 2;
         let slash_matches = self.slash_matches();
         let popup_h = slash_matches.len().min(7) as u16;
-        let [t_area, p_area, i_area, s_area] = Layout::vertical([
+        let reserved = popup_h.saturating_add(input_h).saturating_add(1);
+        let max_plan_h = area.height.saturating_sub(reserved).saturating_sub(1);
+        let plan_h = self.plan_panel_height().min(max_plan_h);
+        let [t_area, plan_area, p_area, i_area, s_area] = Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(plan_h),
             Constraint::Length(popup_h),
             Constraint::Length(input_h),
             Constraint::Length(1),
@@ -1835,12 +2214,134 @@ impl App {
         .areas(area);
         self.draw_transcript(frame, t_area);
 
+        if plan_h > 0 {
+            self.draw_plan_panel(frame, plan_area);
+        }
+
         if popup_h > 0 {
             self.draw_slash_popup(frame, p_area, &slash_matches);
         }
 
         self.draw_composer(frame, i_area, &iv);
         frame.render_widget(self.status_line(), s_area);
+    }
+
+    fn plan_panel_height(&self) -> u16 {
+        if self.current_plan.revision == 0 || self.current_plan.items.is_empty() {
+            return 0;
+        }
+        if self.plan_collapsed {
+            return 1;
+        }
+
+        let active = self
+            .current_plan
+            .items
+            .iter()
+            .filter(|item| item.status == PlanStatus::InProgress)
+            .count();
+        let pending = self
+            .current_plan
+            .items
+            .iter()
+            .filter(|item| item.status == PlanStatus::Pending)
+            .count();
+        let explanation = usize::from(
+            self.current_plan
+                .explanation
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty()),
+        );
+        let hidden_pending = usize::from(pending > 3);
+        1 + u16::try_from(explanation + active + pending.min(3) + hidden_pending)
+            .unwrap_or(u16::MAX)
+    }
+
+    fn draw_plan_panel(&self, frame: &mut Frame, area: Rect) {
+        let counts = self.current_plan.counts();
+        let total = self.current_plan.items.len();
+        let marker = if self.plan_collapsed { "▸" } else { "▾" };
+        let title = Line::from(vec![
+            Span::styled(
+                format!(" {} 计划 ", marker),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{}/{} 完成 · {} 进行中 · {} 待处理 · #{} ",
+                    counts.completed,
+                    total,
+                    counts.in_progress,
+                    counts.pending,
+                    self.current_plan.revision
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" Alt+P ", Style::default().fg(Color::DarkGray)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if self.plan_collapsed || inner.height == 0 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        if let Some(explanation) = self
+            .current_plan
+            .explanation
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            lines.push(Line::from(vec![
+                Span::styled("  最近  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    explanation.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        for item in self
+            .current_plan
+            .items
+            .iter()
+            .filter(|item| item.status == PlanStatus::InProgress)
+        {
+            lines.push(Line::from(vec![
+                Span::styled("  › ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    item.text.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        let pending: Vec<&PlanItem> = self
+            .current_plan
+            .items
+            .iter()
+            .filter(|item| item.status == PlanStatus::Pending)
+            .collect();
+        for item in pending.iter().take(3) {
+            lines.push(Line::from(vec![
+                Span::styled("  · ", Style::default().fg(Color::DarkGray)),
+                Span::raw(item.text.clone()),
+            ]));
+        }
+        if pending.len() > 3 {
+            lines.push(Line::styled(
+                format!("    … 另有 {} 项待处理", pending.len() - 3),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
     }
 
     fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) {
@@ -1981,12 +2482,270 @@ impl App {
         } else if self.scroll_up > 0 {
             format!("  已上翻 {} 行,Esc 回到底部", self.scroll_up)
         } else if self.busy {
-            "  Esc 取消".to_string()
+            if self.tool_log.is_empty() {
+                "  Esc 取消".to_string()
+            } else {
+                "  Ctrl+T 工具详情 · Esc 取消".to_string()
+            }
         } else {
-            "  Enter 发送 · Shift+Enter 换行 · / 命令".to_string()
+            "  Enter 发送 · Shift+Enter 换行 · Ctrl+T 工具 · / 命令".to_string()
         };
         spans.push(Span::styled(hint, dim.add_modifier(Modifier::DIM)));
         Paragraph::new(Line::from(spans))
+    }
+}
+
+fn draw_tool_list(frame: &mut Frame, area: Rect, log: &ToolLog, selected: usize) {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            format!(" 工具调用 ({}) ", log.len()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let [list_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let selected = selected.min(log.len().saturating_sub(1));
+    let page = list_area.height.max(1) as usize;
+    let start = selected.saturating_sub(page.saturating_sub(1));
+    let lines = (start..(start + page).min(log.len()))
+        .filter_map(|index| {
+            let record = log.recent(index)?;
+            let (status, status_style) = match record.status {
+                ToolRunStatus::Running => ("◐", Style::default().fg(Color::Cyan)),
+                ToolRunStatus::Succeeded => ("✓", Style::default().fg(Color::Green)),
+                ToolRunStatus::Failed => ("×", Style::default().fg(Color::Red)),
+            };
+            let active = index == selected;
+            let style = if active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if active { "›" } else { " " };
+            let details = if record.invocation_summary.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", record.invocation_summary)
+            };
+            let text = format!("{:<16} {}{}", record.name, short_id(&record.id), details);
+            Some(Line::from(vec![
+                Span::styled(format!("{} {} ", prefix, status), status_style),
+                Span::styled(
+                    util::ellipsis(&text, list_area.width.saturating_sub(4) as usize),
+                    style,
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(
+        Paragraph::new(" ↑↓ 选择 · Enter 详情 · Esc/Ctrl+T 关闭")
+            .style(Style::default().fg(Color::DarkGray)),
+        footer_area,
+    );
+}
+
+fn draw_tool_detail(
+    frame: &mut Frame,
+    area: Rect,
+    record: Option<&ToolRecord>,
+    scroll: usize,
+) -> usize {
+    frame.render_widget(Clear, area);
+    let (title, border_color) = match record.map(|record| record.status) {
+        Some(ToolRunStatus::Running) => (" 工具详情 · 运行中 ", Color::Cyan),
+        Some(ToolRunStatus::Succeeded) => (" 工具详情 · 已完成 ", Color::Green),
+        Some(ToolRunStatus::Failed) => (" 工具详情 · 失败 ", Color::Red),
+        None => (" 工具详情 ", Color::DarkGray),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return 0;
+    }
+    let [content_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let mut lines = Vec::new();
+    if let Some(record) = record {
+        push_tool_field(
+            &mut lines,
+            "工具",
+            &record.name,
+            content_area.width,
+            Style::default().add_modifier(Modifier::BOLD),
+        );
+        push_tool_field(
+            &mut lines,
+            "调用 ID",
+            &record.id,
+            content_area.width,
+            Style::default().fg(Color::DarkGray),
+        );
+        if !record.invocation_summary.is_empty() {
+            push_tool_field(
+                &mut lines,
+                "参数",
+                &record.invocation_summary,
+                content_area.width,
+                Style::default(),
+            );
+        }
+        if let Some(output) = &record.output {
+            if let Some(command) = output.metadata.command.as_deref() {
+                push_tool_field(
+                    &mut lines,
+                    "命令",
+                    command,
+                    content_area.width,
+                    Style::default().fg(Color::Yellow),
+                );
+            }
+            if let Some(cwd) = output.metadata.cwd.as_deref() {
+                push_tool_field(
+                    &mut lines,
+                    "目录",
+                    cwd,
+                    content_area.width,
+                    Style::default().fg(Color::DarkGray),
+                );
+            }
+        }
+        let exit = record
+            .output
+            .as_ref()
+            .and_then(|output| output.metadata.exit_code)
+            .map(|code| format!(" · exit {code}"))
+            .unwrap_or_default();
+        push_tool_field(
+            &mut lines,
+            "耗时",
+            &format!("{} ms{}", record.elapsed_ms(), exit),
+            content_area.width,
+            Style::default().fg(Color::DarkGray),
+        );
+        if let Some(error) = record.error.as_deref() {
+            push_tool_field(
+                &mut lines,
+                "错误",
+                error,
+                content_area.width,
+                Style::default().fg(Color::Red),
+            );
+        }
+        if let Some(output) = &record.output {
+            if !output.summary.is_empty() {
+                push_tool_field(
+                    &mut lines,
+                    "状态",
+                    &output.summary,
+                    content_area.width,
+                    Style::default().fg(Color::DarkGray),
+                );
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "完整输出",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            if output.content.is_empty() {
+                lines.push(Line::styled(
+                    "(暂无输出)",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                for logical in output.content.split('\n') {
+                    push_wrapped(&mut lines, logical, content_area.width, Style::default());
+                }
+            }
+        } else {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "工具正在运行，进度事件会在此实时更新。",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    } else {
+        lines.push(Line::styled(
+            "该工具记录已不可用。",
+            Style::default().fg(Color::Red),
+        ));
+    }
+
+    let page = content_area.height.max(1) as usize;
+    let max_scroll = lines.len().saturating_sub(page);
+    let scroll = scroll.min(max_scroll);
+    let end = (scroll + page).min(lines.len());
+    frame.render_widget(Paragraph::new(lines[scroll..end].to_vec()), content_area);
+    frame.render_widget(
+        Paragraph::new(format!(
+            " ↑↓/PgUp/PgDn 滚动 · Home/End · Backspace 列表 · Esc/Ctrl+T 关闭   {}/{}",
+            if lines.is_empty() { 0 } else { scroll + 1 },
+            lines.len()
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
+        footer_area,
+    );
+    max_scroll
+}
+
+fn push_tool_field(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    width: u16,
+    value_style: Style,
+) {
+    let prefix = format!("{label}  ");
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let continuation = " ".repeat(prefix_width);
+    let available = width.saturating_sub(prefix_width as u16).max(8) as usize;
+    let wrapped = textwrap::wrap(value, textwrap::Options::new(available));
+    if wrapped.is_empty() {
+        lines.push(Line::styled(prefix, Style::default().fg(Color::DarkGray)));
+        return;
+    }
+    for (index, part) in wrapped.into_iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if index == 0 {
+                    prefix.clone()
+                } else {
+                    continuation.clone()
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(part.into_owned(), value_style),
+        ]));
+    }
+}
+
+fn push_wrapped(lines: &mut Vec<Line<'static>>, text: &str, width: u16, style: Style) {
+    if text.is_empty() {
+        lines.push(Line::raw(""));
+        return;
+    }
+    for part in textwrap::wrap(text, textwrap::Options::new(width.max(8) as usize)) {
+        lines.push(Line::styled(part.into_owned(), style));
     }
 }
 
@@ -2293,6 +3052,178 @@ mod tests {
         term.draw(|f| app.draw(f)).unwrap();
         let content = format!("{:?}", term.backend().buffer());
         assert!(content.contains("mock"), "状态栏应显示 provider 名");
+    }
+
+    #[test]
+    fn active_loop_releases_and_renders_each_streaming_phase_before_settled() {
+        let (mut app, _evt, _cmd, _approvals) = dummy_app();
+        app.on_progress(ProgressEvent::RunStarted {
+            command_id: "command-1".into(),
+        });
+        app.on_progress(ProgressEvent::AssistantDelta {
+            message_id: "message-1".into(),
+            content_index: 0,
+            kind: "thinking".into(),
+            delta: "正在分析项目结构".into(),
+        });
+        app.on_progress(ProgressEvent::AssistantDelta {
+            message_id: "message-1".into(),
+            content_index: 0,
+            kind: "text".into(),
+            delta: "先读取配置。".into(),
+        });
+
+        let committed_thinking = format!("{:?}", app.transcript.drain_finalized_lines(80));
+        assert!(committed_thinking.contains("正在分析项目结构"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let live_assistant = format!("{:?}", terminal.backend().buffer());
+        assert!(live_assistant.contains("先读取配置。"));
+
+        app.on_progress(ProgressEvent::AssistantFinished {
+            message_id: "message-1".into(),
+            text: "先读取配置。".into(),
+        });
+        let committed_assistant = format!("{:?}", app.transcript.drain_finalized_lines(80));
+        assert!(committed_assistant.contains("先读取配置。"));
+
+        app.on_progress(ProgressEvent::ToolStarted {
+            tool_call_id: "tool-1".into(),
+            name: "read_file".into(),
+            summary: "config.toml".into(),
+        });
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let running_tool = format!("{:?}", terminal.backend().buffer());
+        assert!(running_tool.contains("read_file"));
+        assert!(running_tool.contains("运行中"));
+
+        app.on_progress(ProgressEvent::ToolFinished {
+            tool_call_id: "tool-1".into(),
+            name: "read_file".into(),
+            output: crate::sdk::ToolOutputView {
+                content: "读取完成".into(),
+                summary: "已读取 config.toml".into(),
+                metadata: crate::sdk::ToolMetadataView::default(),
+            },
+            error: None,
+        });
+        let committed_tool = format!("{:?}", app.transcript.drain_finalized_lines(80));
+        assert!(committed_tool.contains("read_file"));
+        assert!(committed_tool.contains("读取完成"));
+        assert!(app.busy, "Settled 前 loop 应保持运行状态");
+    }
+
+    #[test]
+    fn tool_progress_updates_by_id_and_detail_overlay_stays_live() {
+        let (mut app, _evt, _cmd, _approvals) = dummy_app();
+        app.on_progress(ProgressEvent::RunStarted {
+            command_id: "command-tools".into(),
+        });
+        app.on_progress(ProgressEvent::ToolStarted {
+            tool_call_id: "tool-a".into(),
+            name: "run_command".into(),
+            summary: "cargo test".into(),
+        });
+        app.on_progress(ProgressEvent::ToolStarted {
+            tool_call_id: "tool-b".into(),
+            name: "read_file".into(),
+            summary: "README.md".into(),
+        });
+        app.on_progress(ProgressEvent::ToolUpdated {
+            tool_call_id: "tool-a".into(),
+            name: "run_command".into(),
+            output: crate::sdk::ToolOutputView {
+                content: "first line".into(),
+                summary: "1/3 complete".into(),
+                metadata: crate::sdk::ToolMetadataView::default(),
+            },
+        });
+        let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let live = format!("{:?}", terminal.backend().buffer());
+        assert!(live.contains("1/3 complete"));
+        assert!(live.contains("run_command"));
+
+        app.on_progress(ProgressEvent::ToolFinished {
+            tool_call_id: "tool-a".into(),
+            name: "run_command".into(),
+            output: crate::sdk::ToolOutputView {
+                content: "stdout\nlast line".into(),
+                summary: "命令执行成功".into(),
+                metadata: crate::sdk::ToolMetadataView {
+                    command: Some("cargo test".into()),
+                    cwd: Some("E:\\work".into()),
+                    elapsed_ms: Some(1250),
+                    exit_code: Some(0),
+                },
+            },
+            error: None,
+        });
+        app.handle_slash("tools");
+        assert!(matches!(app.overlay, Some(Overlay::ToolList { .. })));
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Some(Overlay::ToolDetail { .. })));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let detail = format!("{:?}", terminal.backend().buffer());
+        assert!(detail.contains("cargo test"));
+        assert!(detail.contains("stdout"));
+        assert!(detail.contains("1250 ms"));
+        assert!(app.busy, "工具详情打开时不能阻塞 active loop");
+    }
+
+    #[test]
+    fn inline_viewport_scales_with_terminal_height() {
+        assert_eq!(inline_viewport_rows(6), 6);
+        assert_eq!(inline_viewport_rows(16), 8);
+        assert_eq!(inline_viewport_rows(24), 12);
+        assert_eq!(inline_viewport_rows(40), 16);
+    }
+
+    #[test]
+    fn plan_panel_stays_visible_after_history_drains_and_can_collapse() {
+        let (mut app, _evt, _cmd, _approvals) = dummy_app();
+        app.on_progress(ProgressEvent::PlanUpdated {
+            plan: crate::sdk::PlanView {
+                revision: 3,
+                items: vec![
+                    crate::sdk::PlanItemView {
+                        id: "active".into(),
+                        text: "实现固定计划面板".into(),
+                        status: PlanStatus::InProgress,
+                    },
+                    crate::sdk::PlanItemView {
+                        id: "pending".into(),
+                        text: "补充工具详情".into(),
+                        status: PlanStatus::Pending,
+                    },
+                    crate::sdk::PlanItemView {
+                        id: "done".into(),
+                        text: "修复流式输出".into(),
+                        status: PlanStatus::Completed,
+                    },
+                ],
+                explanation: Some("计划进入界面实现阶段".into()),
+            },
+        });
+
+        let history = format!("{:?}", app.transcript.drain_finalized_lines(80));
+        assert!(history.contains("计划 #3"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let expanded = format!("{:?}", terminal.backend().buffer());
+        assert!(expanded.contains("1/3 完成"));
+        assert!(expanded.contains("实现固定计划面板"));
+        assert!(expanded.contains("补充工具详情"));
+        assert!(expanded.contains("计划进入界面实现阶段"));
+
+        app.on_key(KeyCode::Char('p'), KeyModifiers::ALT);
+        let mut collapsed_terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        collapsed_terminal.draw(|frame| app.draw(frame)).unwrap();
+        let collapsed = format!("{:?}", collapsed_terminal.backend().buffer());
+        assert!(collapsed.contains("1/3 完成"));
+        assert!(!collapsed.contains("实现固定计划面板"));
+        assert!(!collapsed.contains("计划进入界面实现阶段"));
     }
 
     /// 事件驱动的滚动边界:滚过头会被钳制,不会越界 panic。

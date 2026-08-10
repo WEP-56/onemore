@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore } from "@/app/store";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AssistantBlock, TranscriptItem } from "@/rpc/protocol";
-import type { LiveStream } from "@/app/types";
+import type { LiveStream, LiveTool } from "@/app/types";
 import {
   ChevronDown,
   ChevronRight,
@@ -405,7 +405,7 @@ function ToolView({ item }: { item: Extract<TranscriptItem, { type: "tool" }> })
   );
 }
 
-function ToolLive({ tool }: { tool: { toolCallId: string; name: string; summary: string; output: string; status: string; error: string | null } }) {
+function ToolLive({ tool }: { tool: LiveTool }) {
   const [open, setOpen] = useState(false);
   const done = tool.status === "finished";
   const failed = done && Boolean(tool.error);
@@ -417,12 +417,22 @@ function ToolLive({ tool }: { tool: { toolCallId: string; name: string; summary:
         </span>
         <span className="tool-card-name">{tool.name}</span>
         {tool.summary && <span className="tool-card-summary">{tool.summary}</span>}
+        {tool.outputSummary && tool.outputSummary !== tool.summary && (
+          <span className="tool-card-summary">{tool.outputSummary}</span>
+        )}
         {tool.output && (
           <ChevronDown size={13} className={cn("tool-card-chevron", open && "is-open")} />
         )}
       </div>
       {open && tool.output && (
         <div className="tool-card-output">
+          {(tool.metadata.command || tool.metadata.cwd || tool.metadata.elapsed_ms != null || tool.metadata.exit_code != null) && (
+            <div className="tool-card-summary">
+              {[tool.metadata.command, tool.metadata.cwd, tool.metadata.elapsed_ms != null ? `${tool.metadata.elapsed_ms} ms` : null, tool.metadata.exit_code != null ? `exit ${tool.metadata.exit_code}` : null]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
+          )}
           <pre>{tool.output}</pre>
         </div>
       )}

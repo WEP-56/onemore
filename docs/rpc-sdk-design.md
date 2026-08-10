@@ -343,6 +343,9 @@ ProgressEvent
   run_started { command_id }
   retry_scheduled { attempt, max_retries, delay_ms, error }
   retry_started { attempt, max_retries }
+  compaction_started { compaction_id, trigger, estimated_tokens, available_tokens? }
+  compaction_finished { compaction_id, trigger, tokens_before, summary_chars, retained_messages }
+  compaction_failed { compaction_id, trigger, error, cancelled, history_changed }
   assistant_delta { message_id, content_index, kind, delta }
   tool_started { tool_call_id, name, summary }
   tool_updated { tool_call_id, name, output }
@@ -350,19 +353,30 @@ ProgressEvent
   approval_requested { request }
   approval_resolved { request_id, allowed }
   notice { level, text }
+
+ToolOutputView
+  content
+  summary
+  metadata { command?, cwd?, elapsed_ms?, exit_code? }
 ```
 
 约束：
 
 - delta 只携带新增片段，不携带累计 assistant message。
-- `retry_scheduled` 前先发布 phase=`retrying` 的 snapshot；`retry_started` 前先恢复
-  phase=`running`，客户端无需从 Notice 文本猜测重试状态。
+- `retry_scheduled` 前先发布 phase=`retrying` 的 snapshot；`retry_started` 前恢复到
+  phase=`running`，压缩调用内的重试则恢复到 phase=`compacting`。客户端无需从 Notice 文本
+  猜测重试或压缩状态。
+- 每个 `compaction_started` 必须按 `compaction_id` 配对一个 finished/failed 终态；trigger
+  区分 `automatic` 与 `manual`，失败事件明确说明取消状态及历史是否改变。
 - `session_snapshot.transcript` 和最终 transcript item 是权威值；客户端可用它纠正 delta 组装。
 - streaming 中尚未完成的工具参数不进入 snapshot，也绝不能执行。
 - tool progress 到达 `tool_finished` 后关闭，迟到更新必须忽略。
+- `tool_updated.output` 与 `tool_finished.output` 使用同一个封闭 view：`content` 是经过清理和
+  长度限制的模型正文，`summary` 用于紧凑状态行，`metadata` 只允许命令、工作目录、耗时和
+  退出码；工具任意 `details`、provider raw 和未完成参数不得穿过 SDK/RPC 边界。
 - 错误使用稳定 `code + message`；内部 anyhow chain 只写 stderr，不进入协议。
 
-## 6. JSONL RPC v1
+## 6. JSONL RPC v3
 
 ### 6.1 Framing
 
@@ -380,7 +394,7 @@ ProgressEvent
 client 的第一帧必须是：
 
 ```json
-{"type":"hello","version":1}
+{"type":"hello","version":3}
 ```
 
 成功响应：
@@ -388,8 +402,8 @@ client 的第一帧必须是：
 ```json
 {
   "type":"hello",
-  "version":1,
-  "server":{"server_id":"srv-1","protocol_version":1,"capabilities":{"compaction":true,"session_management":true,"interactive_approval":true,"steering":true,"follow_up":true},"models":[]},
+  "version":3,
+  "server":{"server_id":"srv-1","protocol_version":3,"capabilities":{"compaction":true,"session_management":true,"interactive_approval":true,"steering":true,"follow_up":true},"models":[]},
   "snapshot":{"session_id":"session-1","revision":0,"workspace":"E:\\work","phase":"idle","model":{"provider":"openai","model":"gpt-5","effort":"medium","label":"OpenAI / gpt-5"},"usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":null,"cache_write_tokens":null},"transcript":[],"plan":{"revision":0,"items":[],"explanation":null},"queues":{"steering":[],"follow_up":[]},"pending_approval":null}
 }
 ```
@@ -397,12 +411,12 @@ client 的第一帧必须是：
 版本不匹配：
 
 ```json
-{"type":"hello_error","error":{"code":"version_mismatch","message":"unsupported protocol version 2"}}
+{"type":"hello_error","error":{"code":"version_mismatch","message":"unsupported protocol version 1"}}
 ```
 
 hello 失败后进程退出，不尝试兼容或降级。
 
-v1 采用精确版本协商：同一 `version` 内只允许保持现有字段语义的实现修复；任何新增必填字段、
+v3 采用精确版本协商：同一 `version` 内只允许保持现有字段语义的实现修复；任何新增必填字段、
 tag 改名或语义不兼容变化都必须提升协议版本。服务端不猜测、不降级，也不为实现前的实验报文
 保留兼容分支。
 
@@ -433,7 +447,7 @@ event envelope：
 request `id` 由 client 分配，只负责关联本次 response；`command_id` 由 Runtime 分配，用于关联
 已接纳命令与后续事件。每个 request 恰好一个 response。
 
-### 6.4 v1 命令集
+### 6.4 v3 命令集
 
 ```text
 prompt { text }
@@ -512,14 +526,14 @@ assert_eq!(snapshot.phase, SessionPhase::Idle);
 client：
 
 ```json
-{"type":"hello","version":1}
+{"type":"hello","version":3}
 {"type":"request","id":"req-1","request":{"command":"prompt","text":"解释当前 runtime 边界"}}
 ```
 
 server：
 
 ```json
-{"type":"hello","version":1,"server":{"server_id":"srv-1","protocol_version":1,"capabilities":{"compaction":true,"session_management":true,"interactive_approval":true,"steering":true,"follow_up":true},"models":[]},"snapshot":{"session_id":"session-1","revision":0,"workspace":"E:\\work","phase":"idle","model":{"provider":"openai","model":"gpt-5","effort":"medium","label":"OpenAI / gpt-5"},"usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":null,"cache_write_tokens":null},"transcript":[],"plan":{"revision":0,"items":[],"explanation":null},"queues":{"steering":[],"follow_up":[]},"pending_approval":null}}
+{"type":"hello","version":3,"server":{"server_id":"srv-1","protocol_version":3,"capabilities":{"compaction":true,"session_management":true,"interactive_approval":true,"steering":true,"follow_up":true},"models":[]},"snapshot":{"session_id":"session-1","revision":0,"workspace":"E:\\work","phase":"idle","model":{"provider":"openai","model":"gpt-5","effort":"medium","label":"OpenAI / gpt-5"},"usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":null,"cache_write_tokens":null},"transcript":[],"plan":{"revision":0,"items":[],"explanation":null},"queues":{"steering":[],"follow_up":[]},"pending_approval":null}}
 {"type":"response","id":"req-1","ok":true,"result":{"command":"prompt","command_id":"cmd-1"}}
 {"type":"event","event":{"type":"progress","progress":{"type":"run_started","command_id":"cmd-1"}}}
 {"type":"event","event":{"type":"progress","progress":{"type":"assistant_delta","message_id":"msg-1","content_index":0,"kind":"text","delta":"当前 "}}}
@@ -596,12 +610,12 @@ server：
 - [x] 删除旧裸 sender/receiver 的公开入口，不留兼容的第二套 runtime。
 - [x] 验证 CLI 的 clear、session load、model selection、steering 和 approval 行为不退化。
 
-### P4：JSONL RPC v1
+### P4：JSONL RPC v3
 
 - [x] 增加独立 wire DTO；所有 object 使用严格未知字段拒绝。
 - [x] 实现 LF-only、增量 UTF-8 JSONL reader，不使用宽松的按 Unicode 行分隔逻辑。
 - [x] 实现最大帧限制、hello/version、request/response/event envelope。
-- [x] 实现 v1 命令 adapter，所有 mutation 只调用 SessionController。
+- [x] 实现 v3 命令 adapter，所有 mutation 只调用 SessionController。
 - [x] 增加 CLI `--rpc` 模式；stdout 只输出协议，stderr 输出诊断。
 - [x] malformed JSON、未知 command、重复 ID 和版本不匹配均返回稳定错误。
 
@@ -627,7 +641,7 @@ server：
 - [x] 运行 `$env:RUSTDOCFLAGS='-D warnings'; cargo doc --locked --no-deps`。
 - [x] 运行 `git diff --check`。
 
-### 后续阶段，不属于 RPC v1
+### 后续阶段，不属于 RPC v3
 
 - [ ] 基于现有 `parent_id + leaf_id` 增加原子 tree navigation 和 branch projection。
 - [ ] 需要时增加 branch summary，但继续使用 append-only fact 与安全投影。
