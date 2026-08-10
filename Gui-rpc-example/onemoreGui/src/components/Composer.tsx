@@ -4,7 +4,7 @@
 import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStore } from "@/app/store";
-import { ArrowUp, File as FileIcon, Plus, Square } from "lucide-react";
+import { ArrowUp, Command as CommandIcon, File as FileIcon, Plus, Square } from "lucide-react";
 import type { FileTreeNode } from "@/app/types";
 import { formatTokens } from "@/app/util";
 import { cn } from "@/lib/utils";
@@ -35,6 +35,12 @@ interface MentionState {
   startIndex: number; // '@' 的位置
 }
 
+interface SlashChoice {
+  value: string;
+  label: string;
+  description: string;
+}
+
 export default function Composer({ variant = "docked" }: { variant?: "home" | "docked" }) {
   const conn = useStore((s) => s.conn);
   const phase = useStore((s) => s.snapshot?.phase ?? "idle");
@@ -44,6 +50,10 @@ export default function Composer({ variant = "docked" }: { variant?: "home" | "d
   const sendPrompt = useStore((s) => s.sendPrompt);
   const sendSteer = useStore((s) => s.sendSteer);
   const sendAbort = useStore((s) => s.sendAbort);
+  const sendCompact = useStore((s) => s.sendCompact);
+  const sendSkill = useStore((s) => s.sendSkill);
+  const notify = useStore((s) => s.notify);
+  const skills = useStore((s) => s.skills);
   const queues = useStore((s) => s.snapshot?.queues);
   const usage = useStore((s) => s.snapshot?.usage);
   const activeWorkspace = useStore((s) => s.activeWorkspace);
@@ -55,14 +65,77 @@ export default function Composer({ variant = "docked" }: { variant?: "home" | "d
   const [mentionFiles, setMentionFiles] = useState<{ path: string; name: string; is_dir: boolean }[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
   const [mentionCursor, setMentionCursor] = useState(0);
+  const [slashCursor, setSlashCursor] = useState(0);
 
   const connected = conn === "connected";
   const running = RUNNING_PHASES.includes(phase);
   const queuedCount = (queues?.steering.length ?? 0) + (queues?.follow_up.length ?? 0);
 
+  const slashOptions = useMemo<SlashChoice[]>(() => {
+    if (!draft.startsWith("/") || draft.includes("\n")) return [];
+    if (draft.startsWith("/skill ")) {
+      const query = draft.slice("/skill ".length).trim().toLowerCase();
+      return skills
+        .filter((skill) => !query || skill.name.toLowerCase().includes(query))
+        .slice(0, 30)
+        .map((skill) => ({
+          value: `/skill ${skill.name}`,
+          label: skill.name,
+          description: `${skill.scope} · ${skill.description}`,
+        }));
+    }
+    if (draft.includes(" ")) return [];
+    const query = draft.slice(1).toLowerCase();
+    return [
+      { value: "/compact", label: "/compact", description: "压缩当前会话历史" },
+      { value: "/skill ", label: "/skill", description: "选择并加载一个技能" },
+    ].filter((choice) => choice.label.slice(1).startsWith(query));
+  }, [draft, skills]);
+
+  const applySlashChoice = (choice: SlashChoice) => {
+    setDraft(choice.value);
+    setSlashCursor(0);
+    requestAnimationFrame(() => {
+      const input = textareaRef.current;
+      input?.focus();
+      input?.setSelectionRange(choice.value.length, choice.value.length);
+    });
+  };
+
   const submit = (text?: string) => {
     const value = (text ?? draft).trim();
     if (!value || busy || !connected) return;
+
+    if (value.startsWith("/")) {
+      const [command, ...args] = value.split(/\s+/);
+      const argument = args.join(" ").trim();
+      if (command === "/compact") {
+        if (argument) {
+          notify("error", "/compact 不接受参数。");
+          return;
+        }
+        void sendCompact();
+      } else if (command === "/skill") {
+        if (!argument) {
+          notify("info", skills.length > 0 ? "请选择一个技能。" : "当前 Runtime 没有发现可用技能。");
+          setDraft("/skill ");
+          return;
+        }
+        if (!skills.some((skill) => skill.name === argument)) {
+          notify("error", `未发现技能 ${JSON.stringify(argument)}。`);
+          return;
+        }
+        void sendSkill(argument);
+      } else {
+        notify("error", `不支持的斜杠命令：${command}`);
+        return;
+      }
+      setDraft("");
+      setHistoryIndex(-1);
+      pushHistory(value);
+      return;
+    }
+
     setDraft("");
     setHistoryIndex(-1);
     pushHistory(value);
@@ -134,11 +207,33 @@ export default function Composer({ variant = "docked" }: { variant?: "home" | "d
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!mention && slashOptions.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashCursor((cursor) => Math.min(cursor + 1, slashOptions.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashCursor((cursor) => Math.max(cursor - 1, 0));
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        applySlashChoice(slashOptions[slashCursor] ?? slashOptions[0]);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (mention) {
         const pick = filteredMentions[mentionCursor];
         if (pick) applyMention(pick.path);
+        return;
+      }
+      const slashReady = draft.trim() === "/compact" || /^\/skill\s+\S/.test(draft.trim());
+      if (slashOptions.length > 0 && !slashReady) {
+        applySlashChoice(slashOptions[slashCursor] ?? slashOptions[0]);
         return;
       }
       submit();
@@ -165,6 +260,11 @@ export default function Composer({ variant = "docked" }: { variant?: "home" | "d
 
   const handleChange = (value: string) => {
     setDraft(value);
+    if (value.startsWith("/")) {
+      setMention(null);
+      setSlashCursor(0);
+      return;
+    }
     const el = textareaRef.current;
     const caret = el?.selectionStart ?? value.length;
     // 检测 @:向前找最近的 @(前面是空白或行首)
@@ -260,6 +360,32 @@ export default function Composer({ variant = "docked" }: { variant?: "home" | "d
           </button>
           </div>
         </div>
+
+        {!mention && slashOptions.length > 0 && (
+          <div className="composer-mention-menu composer-slash-menu" onMouseDown={(e) => e.preventDefault()}>
+            <div className="composer-mention-title">命令</div>
+            <div className="composer-mention-list">
+              {slashOptions.map((choice, index) => (
+                <button
+                  key={choice.value}
+                  type="button"
+                  className={cn("composer-mention-row composer-slash-row", index === slashCursor && "is-active")}
+                  onMouseEnter={() => setSlashCursor(index)}
+                  onClick={() => applySlashChoice(choice)}
+                >
+                  <CommandIcon size={12} />
+                  <span className="composer-slash-copy">
+                    <strong>{choice.label}</strong>
+                    <small>{choice.description}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="composer-mention-hint">
+              <span>↑↓ 选择</span><span>Tab 补全</span><span>Enter 执行</span>
+            </div>
+          </div>
+        )}
 
         {mention && (
           <div className="composer-mention-menu" onMouseDown={(e) => e.preventDefault()}>

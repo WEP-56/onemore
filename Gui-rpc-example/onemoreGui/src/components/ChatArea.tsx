@@ -19,6 +19,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isAutoContinuePrompt } from "@/app/util";
 import { Markdown } from "@/components/Markdown";
 import Composer from "@/components/Composer";
 import BrandMark from "@/components/BrandMark";
@@ -30,6 +31,7 @@ export default function ChatArea() {
   const liveTools = useStore((s) => s.liveTools);
   const liveUsers = useStore((s) => s.liveUsers);
   const liveNotices = useStore((s) => s.liveNotices);
+  const lastError = useStore((s) => s.lastError);
   if (conn === "disconnected") return <WelcomeScreen />;
 
   const hasConversation = Boolean(
@@ -37,7 +39,8 @@ export default function ChatArea() {
       Object.keys(liveStreams).length ||
       Object.keys(liveTools).length ||
       Object.keys(liveUsers).length ||
-      liveNotices.length,
+      liveNotices.length ||
+      lastError,
   );
 
   if (!hasConversation) return <NewConversationScreen />;
@@ -145,6 +148,7 @@ function Transcript() {
   const liveTools = useStore((s) => s.liveTools);
   const liveUsers = useStore((s) => s.liveUsers);
   const liveNotices = useStore((s) => s.liveNotices);
+  const lastError = useStore((s) => s.lastError);
   const scrollRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
@@ -152,12 +156,20 @@ function Transcript() {
 
   const nodes = useMemo(() => {
     const out: { key: string; node: ReactNode }[] = [];
+    const resolvedToolIds = new Set(
+      (snapshot?.transcript ?? [])
+        .filter((item): item is Extract<TranscriptItem, { type: "tool" }> => item.type === "tool")
+        .map((item) => item.tool_call_id),
+    );
     for (const item of snapshot?.transcript ?? [])
-      out.push({ key: `t:${tk(item)}`, node: <ItemView item={item} /> });
+      out.push({ key: `t:${tk(item)}`, node: <ItemView item={item} resolvedToolIds={resolvedToolIds} /> });
+
+    const live: { key: string; node: ReactNode; at: number; order: number }[] = [];
+    let order = 0;
     for (const u of Object.values(liveUsers))
-      out.push({ key: `u:${u.key}`, node: <UserView text={u.text} /> });
+      live.push({ key: `u:${u.key}`, node: <UserView text={u.text} />, at: u.at, order: order++ });
     for (const n of liveNotices)
-      out.push({ key: `n:${n.key}`, node: <NoticeView level={n.level} text={n.text} /> });
+      live.push({ key: `n:${n.key}`, node: <NoticeView level={n.level} text={n.text} />, at: n.at, order: order++ });
     const byMsg = new Map<string, LiveStream[]>();
     for (const s of Object.values(liveStreams)) {
       const arr = byMsg.get(s.messageId) ?? [];
@@ -169,12 +181,26 @@ function Transcript() {
       const blocks: AssistantBlock[] = arr.map((s) =>
         s.kind === "thinking" ? { type: "thinking", text: s.text } : { type: "text", text: s.text },
       );
-      out.push({ key: `s:${id}`, node: <AssistantView blocks={blocks} streaming={!arr.every((s) => s.sealed)} /> });
+      live.push({
+        key: `s:${id}`,
+        node: <AssistantView blocks={blocks} streaming={!arr.every((s) => s.sealed)} />,
+        at: Math.min(...arr.map((stream) => stream.createdAt)),
+        order: order++,
+      });
     }
     for (const t of Object.values(liveTools))
-      out.push({ key: `lt:${t.toolCallId}`, node: <ToolLive tool={t} /> });
+      live.push({ key: `lt:${t.toolCallId}`, node: <ToolLive tool={t} />, at: t.createdAt, order: order++ });
+    live.sort((left, right) => left.at - right.at || left.order - right.order);
+    out.push(...live.map(({ key, node }) => ({ key, node })));
+
+    if (lastError) {
+      out.push({
+        key: `error:${lastError.code}:${lastError.message}`,
+        node: <NoticeView level="error" text={lastError.message} />,
+      });
+    }
     return out;
-  }, [snapshot, liveStreams, liveTools, liveUsers, liveNotices]);
+  }, [snapshot, liveStreams, liveTools, liveUsers, liveNotices, lastError]);
 
   useEffect(() => {
     if (follow && nodes.length > 0) {
@@ -225,16 +251,24 @@ function tk(item: TranscriptItem): string {
   }
 }
 
-function ItemView({ item }: { item: TranscriptItem }) {
+function ItemView({ item, resolvedToolIds }: { item: TranscriptItem; resolvedToolIds: Set<string> }) {
   switch (item.type) {
     case "user_message": return <UserView text={item.text} />;
-    case "assistant_message": return <AssistantView blocks={item.blocks} streaming={false} />;
+    case "assistant_message": {
+      const blocks = item.blocks.filter(
+        (block) => block.type !== "tool_call" || !resolvedToolIds.has(block.id),
+      );
+      return blocks.length > 0 ? <AssistantView blocks={blocks} streaming={false} /> : null;
+    }
     case "tool": return <ToolView item={item} />;
     case "notice": return <NoticeView level={item.level} text={item.text} />;
   }
 }
 
 function UserView({ text }: { text: string }) {
+  if (isAutoContinuePrompt(text)) {
+    return <NoticeView level="info" text="计划尚未完成，已自动继续执行" />;
+  }
   return (
     <div className="message user">
       <div className="message-body">

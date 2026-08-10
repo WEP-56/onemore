@@ -54,6 +54,13 @@ export function workspaceKey(path: string): string {
   return /^[a-z]:\\/i.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
 }
 
+export const AUTO_CONTINUE_PREFIX = "[OnemoreGui 自动续跑]";
+export const AUTO_CONTINUE_PROMPT = `${AUTO_CONTINUE_PREFIX} 继续执行当前计划中尚未完成的项目。不要仅汇报进度；请实际完成工作，并及时更新计划状态。`;
+
+export function isAutoContinuePrompt(text: string): boolean {
+  return text.startsWith(AUTO_CONTINUE_PREFIX);
+}
+
 /// 格式化时间戳（秒）为简短的相对时间。
 export function relativeTime(ts: number): string {
   const now = Date.now();

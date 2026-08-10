@@ -23,6 +23,8 @@ use super::writer;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_LINES: usize = 400;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartOptions {
@@ -117,8 +119,19 @@ fn build_command(executable: &str, config: Option<&str>) -> Result<Command, GuiE
         cmd.arg("--config").arg(cfg);
     }
     cmd.env(ONEMORE_HOME_ENV, onemore_data_dir()?);
+    hide_console_window(&mut cmd);
     Ok(cmd)
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
 
 fn spawn_with_fallback(options: &StartOptions) -> Result<Child, GuiError> {
     let first = {
@@ -139,6 +152,7 @@ fn spawn_with_fallback(options: &StartOptions) -> Result<Child, GuiError> {
                     c.arg("--config").arg(cfg);
                 }
                 c.env(ONEMORE_HOME_ENV, onemore_data_dir()?);
+                hide_console_window(&mut c);
                 c.current_dir(&options.workspace)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())

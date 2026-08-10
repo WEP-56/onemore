@@ -26,6 +26,12 @@ export interface ServerInfo {
   models: ModelMetadata[];
 }
 
+export interface SkillMetadataView {
+  name: string;
+  description: string;
+  scope: "repo" | "user";
+}
+
 // ---- SessionSnapshot ----
 export type SessionPhase =
   | "idle"
@@ -170,7 +176,7 @@ export type ProgressEvent =
   | { type: "notice"; level: NoticeLevel; text: string }
   | { type: "error"; error: CommandErrorView }
   | { type: "plan_updated"; plan: PlanView }
-  | { type: "skills_discovered"; skills: unknown[]; warnings: string[] }
+  | { type: "skills_discovered"; skills: SkillMetadataView[]; warnings: string[] }
   | { type: "usage"; usage: UsageView }
   | { type: "conversation_cleared" }
   | { type: "model_selection_changed"; selection: ModelSelectionView }

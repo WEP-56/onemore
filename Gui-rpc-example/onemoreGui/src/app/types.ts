@@ -24,6 +24,7 @@ export interface LiveStream {
   kind: string;
   text: string;
   sealed: boolean;
+  createdAt: number;
   updatedAt: number;
 }
 
@@ -35,6 +36,7 @@ export interface LiveTool {
   status: "started" | "updated" | "finished";
   error: string | null;
   sealed: boolean;
+  createdAt: number;
   updatedAt: number;
 }
 

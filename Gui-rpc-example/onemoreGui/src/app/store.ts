@@ -22,7 +22,7 @@ import {
   applyTransportError,
   freshViewState,
 } from "../rpc/reducer";
-import type { ApprovalDecision } from "../rpc/protocol";
+import type { ApprovalDecision, NoticeLevel, SkillMetadataView } from "../rpc/protocol";
 import type {
   ConfigDto,
   GitStatus,
@@ -32,7 +32,7 @@ import type {
   WorkspaceGroup,
   WorkspaceList,
 } from "./types";
-import { normalizeWorkspace, workspaceKey } from "./util";
+import { AUTO_CONTINUE_PROMPT, normalizeWorkspace, workspaceKey } from "./util";
 
 interface AppStore extends SessionViewState {
   // workspace 管理
@@ -41,6 +41,7 @@ interface AppStore extends SessionViewState {
   activeWorkspace: string | null;
   // session 列表（跨 workspace 扫描）
   sessions: SessionEntry[];
+  skills: SkillMetadataView[];
   // session UI 状态
   pinnedSessions: Record<string, number>;
   // config
@@ -60,6 +61,7 @@ interface AppStore extends SessionViewState {
   setDraft(v: string): void;
   setSearchQuery(v: string): void;
   setSettingsOpen(open: boolean): void;
+  notify(level: NoticeLevel, text: string): void;
 
   // workspace
   loadWorkspaces(): Promise<void>;
@@ -97,6 +99,8 @@ interface AppStore extends SessionViewState {
   sendPrompt(text: string): Promise<void>;
   sendSteer(text: string): Promise<void>;
   sendAbort(): Promise<void>;
+  sendCompact(): Promise<void>;
+  sendSkill(name: string): Promise<void>;
   setModel(provider: string, model: string, effort: string): Promise<void>;
   respondApproval(decision: ApprovalDecision): Promise<void>;
   snapshotNow(): Promise<void>;
@@ -106,6 +110,8 @@ interface AppStore extends SessionViewState {
 const PINNED_KEY = "onemore-gui:pinned-sessions";
 const LAST_WORKSPACE_KEY = "onemore-gui:last-workspace";
 const LAST_SESSION_KEY = "onemore-gui:last-session";
+const MAX_AUTO_PLAN_CONTINUATIONS = 12;
+const MAX_STAGNANT_PLAN_CONTINUATIONS = 2;
 
 function readStoredValue(key: string): string | null {
   try {
@@ -145,6 +151,26 @@ function writePinnedSessions(pinned: Record<string, number>) {
 
 export const useStore = create<AppStore>((set, get) => {
   let restoreSessionId: string | null = null;
+  let autoContinueTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoPlan = {
+    enabled: false,
+    total: 0,
+    lastRevision: null as number | null,
+    stagnant: 0,
+  };
+
+  function resetAutoPlan(enabled = false) {
+    if (autoContinueTimer) clearTimeout(autoContinueTimer);
+    autoContinueTimer = null;
+    autoPlan = { enabled, total: 0, lastRevision: null, stagnant: 0 };
+  }
+
+  function pushNotice(level: NoticeLevel, text: string) {
+    const at = Date.now();
+    const notice = { key: `client:${at}:${Math.random()}`, level, text, at };
+    set({ liveNotices: [...get().liveNotices, notice].slice(-50) });
+  }
+
   async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
     set({ busy: true });
     try {
@@ -173,7 +199,46 @@ export const useStore = create<AppStore>((set, get) => {
     } catch (e) {
       const err = toErrorMessage(e);
       set(applyRequestError(get(), err.code, err.message));
+      if (command === "prompt" || command === "follow_up") resetAutoPlan();
     }
+  }
+
+  function continueActivePlan() {
+    const state = get();
+    if (!autoPlan.enabled) return;
+    const activeItems = state.snapshot?.plan.items.filter((item) => item.status !== "completed") ?? [];
+    if (activeItems.length === 0) {
+      resetAutoPlan();
+      return;
+    }
+    if (state.lastTerminal?.status !== "succeeded") {
+      resetAutoPlan();
+      return;
+    }
+
+    const revision = state.snapshot?.plan.revision ?? 0;
+    autoPlan.stagnant = autoPlan.lastRevision === revision ? autoPlan.stagnant + 1 : 0;
+    autoPlan.lastRevision = revision;
+    if (
+      autoPlan.total >= MAX_AUTO_PLAN_CONTINUATIONS
+      || autoPlan.stagnant >= MAX_STAGNANT_PLAN_CONTINUATIONS
+    ) {
+      const reason = autoPlan.total >= MAX_AUTO_PLAN_CONTINUATIONS
+        ? `已达到自动续跑上限（${MAX_AUTO_PLAN_CONTINUATIONS} 次）`
+        : "计划连续两轮没有推进";
+      resetAutoPlan();
+      pushNotice("warning", `${reason}，已停止自动续跑；请检查当前结果后再决定是否继续。`);
+      return;
+    }
+
+    autoPlan.total += 1;
+    const attempt = autoPlan.total;
+    pushNotice("info", `计划仍有 ${activeItems.length} 项未完成，正在自动续跑（${attempt}/${MAX_AUTO_PLAN_CONTINUATIONS}）`);
+    autoContinueTimer = setTimeout(() => {
+      autoContinueTimer = null;
+      if (!autoPlan.enabled || get().conn !== "connected") return;
+      void sendCommand("follow_up", { text: AUTO_CONTINUE_PROMPT });
+    }, 250);
   }
 
   return {
@@ -182,6 +247,7 @@ export const useStore = create<AppStore>((set, get) => {
     workspaceGroups: [],
     activeWorkspace: null,
     sessions: [],
+    skills: [],
     pinnedSessions: readPinnedSessions(),
     configText: "",
     configDirty: false,
@@ -215,17 +281,23 @@ export const useStore = create<AppStore>((set, get) => {
             break;
           case "event":
             set(applyEvent(s, ev.event));
+            if (ev.event.type === "progress" && ev.event.progress.type === "skills_discovered") {
+              set({ skills: ev.event.progress.skills });
+              for (const warning of ev.event.progress.warnings) pushNotice("warning", warning);
+            }
             if (ev.event.type === "settled") {
-              void rpcRequest("get_snapshot").catch(() => {});
               void get().loadSessions();
+              const state = get();
+              const hasActivePlan = state.snapshot?.plan.items.some((item) => item.status !== "completed") ?? false;
+              if (!hasActivePlan && state.lastTerminal?.status === "succeeded") playSuccessSound();
+              continueActivePlan();
             }
             if (ev.event.type === "session_snapshot") {
               writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.event.snapshot.workspace));
               writeStoredValue(LAST_SESSION_KEY, ev.event.snapshot.session_id);
             }
             if (ev.event.type === "command_finished") {
-              if (ev.event.status === "succeeded") playSuccessSound();
-              else if (ev.event.status === "failed") playErrorSound();
+              if (ev.event.status === "failed") playErrorSound();
             }
             break;
           case "stderr":
@@ -235,6 +307,7 @@ export const useStore = create<AppStore>((set, get) => {
             set(applyTransportError(s, ev.code, ev.message));
             break;
           case "process_exit":
+            resetAutoPlan();
             set(applyProcessExit(s, ev.code));
             break;
         }
@@ -262,6 +335,7 @@ export const useStore = create<AppStore>((set, get) => {
     setDraft: (draft) => set({ draft }),
     setSearchQuery: (searchQuery) => set({ searchQuery }),
     setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+    notify: (level, text) => pushNotice(level, text),
 
     loadWorkspaces: async () => {
       try {
@@ -352,6 +426,7 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     loadSession: async (id) => {
+      resetAutoPlan();
       const session = get().sessions.find((item) => item.id === id);
       if (!session) return;
       const targetKey = workspaceKey(session.workspace);
@@ -369,6 +444,7 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     newConversation: async () => {
+      resetAutoPlan();
       const active = get().activeWorkspace;
       if (!active) return;
       await get().loadSessions();
@@ -455,9 +531,10 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     connect: async (workspace) => {
+      resetAutoPlan();
       const normalized = normalizeWorkspace(workspace);
       writeStoredValue(LAST_WORKSPACE_KEY, normalized);
-      set({ activeWorkspace: workspace, ...freshViewState(), conn: "spawning" });
+      set({ activeWorkspace: workspace, skills: [], ...freshViewState(), conn: "spawning" });
       try {
         await rpcStart({
           executable: "onemore",
@@ -476,6 +553,7 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     disconnect: async () => {
+      resetAutoPlan();
       set({ conn: "shutting_down" });
       try {
         await rpcStop();
@@ -484,9 +562,34 @@ export const useStore = create<AppStore>((set, get) => {
       }
     },
 
-    sendPrompt: (text) => sendCommand("prompt", { text }),
+    sendPrompt: (text) => {
+      resetAutoPlan(true);
+      return sendCommand("prompt", { text });
+    },
     sendSteer: (text) => sendCommand("steer", { text }),
-    sendAbort: () => sendCommand("abort", null),
+    sendAbort: () => {
+      resetAutoPlan();
+      return sendCommand("abort", null);
+    },
+    sendCompact: () => {
+      resetAutoPlan();
+      return sendCommand("compact", null);
+    },
+    sendSkill: async (name) => {
+      const skill = get().skills.find((item) => item.name === name);
+      if (!skill) {
+        pushNotice("error", `未发现技能 ${JSON.stringify(name)}，请检查技能目录后重启会话。`);
+        return;
+      }
+      resetAutoPlan(true);
+      const phase = get().snapshot?.phase ?? "idle";
+      const command = ["running", "retrying", "compacting", "waiting_approval"].includes(phase)
+        ? "steer"
+        : "prompt";
+      await sendCommand(command, {
+        text: `请先加载并严格遵循技能 ${JSON.stringify(skill.name)}，然后继续处理当前请求。`,
+      });
+    },
     setModel: (provider, model, effort) =>
       sendCommand("set_model", { provider, model, effort }),
 

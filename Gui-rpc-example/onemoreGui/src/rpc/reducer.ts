@@ -10,7 +10,14 @@ import type {
 } from "./protocol";
 import type { LiveNotice, LiveStream, LiveTool, RunMetrics, SessionViewState } from "../app/types";
 
-const now = () => Date.now();
+let lastEventAt = 0;
+
+// Date.now() can return the same value for several RPC frames in one render burst.
+// Keep timestamps strictly increasing so live projections preserve arrival order.
+const now = () => {
+  lastEventAt = Math.max(Date.now(), lastEventAt + 1);
+  return lastEventAt;
+};
 
 export function freshMetrics(): RunMetrics {
   return {
@@ -72,21 +79,11 @@ export function applySnapshot(state: SessionViewState, snapshot: SessionSnapshot
   const queueLen = snapshot.queues.steering.length + snapshot.queues.follow_up.length;
   metrics = { ...metrics, maxQueue: Math.max(metrics.maxQueue, queueLen) };
 
-  const committedStreamIds = new Set<string>();
-  const committedToolIds = new Set<string>();
-  for (const item of snapshot.transcript) {
-    if (item.type === "assistant_message") committedStreamIds.add(item.id);
-    if (item.type === "tool") committedToolIds.add(item.tool_call_id);
-  }
-
-  const liveStreams: Record<string, LiveStream> = {};
-  for (const [key, s] of Object.entries(state.liveStreams)) {
-    if (!committedStreamIds.has(s.messageId)) liveStreams[key] = s;
-  }
-  const liveTools: Record<string, LiveTool> = {};
-  for (const [key, t] of Object.entries(state.liveTools)) {
-    if (!committedToolIds.has(t.toolCallId)) liveTools[key] = t;
-  }
+  // progress 中的 message_id 是传输期 ID，与持久化 transcript entry ID 不同。
+  // idle 快照代表本轮已提交完成，此时必须整体丢弃实时投影，否则会重复并错序。
+  const settled = snapshot.phase === "idle";
+  const liveStreams = settled ? {} : state.liveStreams;
+  const liveTools = settled ? {} : state.liveTools;
 
   let run = state.run;
   if (snapshot.phase === "idle" && run.commandId) {
@@ -98,6 +95,8 @@ export function applySnapshot(state: SessionViewState, snapshot: SessionSnapshot
     snapshot,
     liveStreams,
     liveTools,
+    liveUsers: settled ? {} : state.liveUsers,
+    liveNotices: settled ? [] : state.liveNotices,
     liveApproval: snapshot.pending_approval,
     run,
     metrics,
@@ -155,9 +154,10 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
     case "assistant_delta": {
       const key = `${p.message_id}:${p.content_index}:${p.kind}`;
       const prev = state.liveStreams[key];
+      const timestamp = now();
       const stream: LiveStream = prev
-        ? { ...prev, text: prev.text + p.delta, updatedAt: now() }
-        : { key, messageId: p.message_id, contentIndex: p.content_index, kind: p.kind, text: p.delta, sealed: false, updatedAt: now() };
+        ? { ...prev, text: prev.text + p.delta, updatedAt: timestamp }
+        : { key, messageId: p.message_id, contentIndex: p.content_index, kind: p.kind, text: p.delta, sealed: false, createdAt: timestamp, updatedAt: timestamp };
       const metrics = { ...state.metrics, assistantDeltaChars: state.metrics.assistantDeltaChars + p.delta.length };
       return { ...state, metrics, liveStreams: { ...state.liveStreams, [key]: stream } };
     }
@@ -165,12 +165,18 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
       const liveStreams = { ...state.liveStreams };
       for (const [key, s] of Object.entries(liveStreams)) {
         if (s.messageId === p.message_id) {
-          liveStreams[key] = { ...s, sealed: true, text: p.text || s.text, updatedAt: now() };
+          liveStreams[key] = {
+            ...s,
+            sealed: true,
+            text: s.kind === "thinking" ? s.text : (p.text || s.text),
+            updatedAt: now(),
+          };
         }
       }
       return { ...state, liveStreams };
     }
     case "tool_started": {
+      const timestamp = now();
       const tool: LiveTool = {
         toolCallId: p.tool_call_id,
         name: p.name,
@@ -179,23 +185,26 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
         status: "started",
         error: null,
         sealed: false,
-        updatedAt: now(),
+        createdAt: timestamp,
+        updatedAt: timestamp,
       };
       const metrics = { ...state.metrics, toolsStarted: state.metrics.toolsStarted + 1 };
       return { ...state, metrics, liveTools: { ...state.liveTools, [p.tool_call_id]: tool } };
     }
     case "tool_updated": {
       const prev = state.liveTools[p.tool_call_id];
+      const timestamp = now();
       const tool: LiveTool = prev
-        ? { ...prev, output: p.output, status: "updated", updatedAt: now() }
-        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "updated", error: null, sealed: false, updatedAt: now() };
+        ? { ...prev, output: p.output, status: "updated", updatedAt: timestamp }
+        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "updated", error: null, sealed: false, createdAt: timestamp, updatedAt: timestamp };
       return { ...state, liveTools: { ...state.liveTools, [p.tool_call_id]: tool } };
     }
     case "tool_finished": {
       const prev = state.liveTools[p.tool_call_id];
+      const timestamp = now();
       const tool: LiveTool = prev
-        ? { ...prev, output: p.output, status: "finished", sealed: true, error: p.error?.message ?? null, updatedAt: now() }
-        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "finished", error: p.error?.message ?? null, sealed: true, updatedAt: now() };
+        ? { ...prev, output: p.output, status: "finished", sealed: true, error: p.error?.message ?? null, updatedAt: timestamp }
+        : { toolCallId: p.tool_call_id, name: p.name, summary: p.name, output: p.output, status: "finished", error: p.error?.message ?? null, sealed: true, createdAt: timestamp, updatedAt: timestamp };
       const metrics = { ...state.metrics, toolsFinished: state.metrics.toolsFinished + 1 };
       return { ...state, metrics, liveTools: { ...state.liveTools, [p.tool_call_id]: tool } };
     }
@@ -207,11 +216,13 @@ function applyProgress(state: SessionViewState, p: ProgressEvent): SessionViewSt
         liveApproval: state.liveApproval?.request_id === p.request_id ? null : state.liveApproval,
       };
     case "user_message": {
-      const key = `user:${p.text}:${now()}`;
-      return { ...state, liveUsers: { ...state.liveUsers, [key]: { key, text: p.text, at: now() } } };
+      const timestamp = now();
+      const key = `user:${p.text}:${timestamp}`;
+      return { ...state, liveUsers: { ...state.liveUsers, [key]: { key, text: p.text, at: timestamp } } };
     }
     case "notice": {
-      const n: LiveNotice = { key: `notice:${now()}`, level: p.level, text: p.text, at: now() };
+      const timestamp = now();
+      const n: LiveNotice = { key: `notice:${timestamp}`, level: p.level, text: p.text, at: timestamp };
       return { ...state, liveNotices: [...state.liveNotices, n].slice(-50) };
     }
     case "error":
