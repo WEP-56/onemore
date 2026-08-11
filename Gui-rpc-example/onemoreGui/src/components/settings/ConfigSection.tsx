@@ -9,10 +9,18 @@ import {
   Copy,
   Plus,
   Save,
+  Server,
   Trash2,
   Wrench,
 } from "lucide-react";
-import type { ConfigDto, ModelDto, ProviderDto } from "@/app/types";
+import type {
+  ConfigDto,
+  McpServerDto,
+  ModelDto,
+  ProviderDto,
+  WebBackendDto,
+  WebDto,
+} from "@/app/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +29,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 const SHELL_OPTIONS = ["auto", "gitbash", "powershell", "cmd"];
+const WEB_BACKENDS = ["tavily", "brave", "exa", "serper"];
 const RULE_OPTIONS = [
   { value: "allow", label: "允许" },
   { value: "ask", label: "每次询问" },
@@ -62,6 +71,45 @@ function emptyModel(): ModelDto {
   };
 }
 
+function emptyWebBackend(): WebBackendDto {
+  return { name: "", api_key: null, api_key_env: null };
+}
+
+function emptyMcpServer(): McpServerDto {
+  return {
+    name: "",
+    command: "",
+    args: [],
+    env: {},
+    cwd: null,
+    enabled: true,
+    startup_timeout_ms: 30000,
+    call_timeout_ms: 60000,
+    always_ask: true,
+    include_tools: null,
+    exclude_tools: [],
+  };
+}
+
+function commaList(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function envText(env: Record<string, string>): string {
+  return Object.entries(env).map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
+function parseEnv(value: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of value.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const separator = line.indexOf("=");
+    const key = (separator < 0 ? line : line.slice(0, separator)).trim();
+    if (key) env[key] = separator < 0 ? "" : line.slice(separator + 1);
+  }
+  return env;
+}
+
 function nextAvailableName(prefix: string, names: string[]) {
   let suffix = names.length + 1;
   let candidate = `${prefix}-${suffix}`;
@@ -82,6 +130,9 @@ function configValidation(draft: ConfigDto): string | null {
   }
 
   for (const provider of draft.providers) {
+    if (provider.api_key && provider.api_key_env) {
+      return `${provider.name} 的 API Key 与环境变量只能填写一个`;
+    }
     const modelNames = provider.models.map((model) => model.name.trim());
     if (modelNames.length === 0) return `${provider.name} 至少需要配置一个模型`;
     if (modelNames.some((name) => !name)) return `${provider.name} 中的模型名称不能为空`;
@@ -99,6 +150,41 @@ function configValidation(draft: ConfigDto): string | null {
       if (model.max_tokens != null && model.max_tokens > model.context_window) {
         return `${provider.name} / ${model.name} 的 Max Tokens 不能超过 Context Window`;
       }
+    }
+  }
+  const backendNames = draft.web.backends.map((backend) => backend.name.trim());
+  if (backendNames.some((name) => !name)) return "Web 搜索厂商名称不能为空";
+  if (new Set(backendNames).size !== backendNames.length) return "Web 搜索厂商名称不能重复";
+  if (backendNames.some((name) => !WEB_BACKENDS.includes(name))) {
+    return `Web 搜索厂商仅支持 ${WEB_BACKENDS.join("、")}`;
+  }
+  if (new Set(draft.web.external_backends).size !== draft.web.external_backends.length) {
+    return "Web 外部厂商优先级不能包含重复项";
+  }
+  if (draft.web.external_backends.some((name) => !WEB_BACKENDS.includes(name))) {
+    return `Web 外部厂商仅支持 ${WEB_BACKENDS.join("、")}`;
+  }
+  if (draft.web.mode === "external" && draft.web.external_backends.length === 0) {
+    return "仅外部搜索模式至少需要一个外部厂商";
+  }
+  if (draft.web.allowed_domains.length > 100) return "Web 允许域名不能超过 100 个";
+  for (const backend of draft.web.backends) {
+    if (backend.api_key && backend.api_key_env) {
+      return `${backend.name} 的 API Key 与环境变量只能填写一个`;
+    }
+  }
+  const serverNames = draft.mcp_servers.map((server) => server.name.trim());
+  if (new Set(serverNames).size !== serverNames.length) return "MCP server 名称不能重复";
+  for (const server of draft.mcp_servers) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(server.name)) {
+      return `MCP server 名称 ${JSON.stringify(server.name)} 格式无效`;
+    }
+    if (!server.command.trim()) return `${server.name} 的启动命令不能为空`;
+    if (server.startup_timeout_ms != null && server.startup_timeout_ms <= 0) {
+      return `${server.name} 的启动超时必须大于 0`;
+    }
+    if (server.call_timeout_ms != null && server.call_timeout_ms <= 0) {
+      return `${server.name} 的调用超时必须大于 0`;
     }
   }
   return null;
@@ -337,6 +423,21 @@ function VisualConfig() {
         </div>
       </section>
 
+      <section className="settings-section">
+        <h3 className="settings-section-title">Web 搜索</h3>
+        <p className="settings-section-desc">配置搜索模式、结果范围、位置提示和外部搜索厂商。</p>
+        <WebEditor web={draft.web} onChange={(web) => patch((next) => { next.web = web; })} />
+      </section>
+
+      <section className="settings-section">
+        <h3 className="settings-section-title">MCP Servers</h3>
+        <p className="settings-section-desc">管理通过 stdio 启动的 MCP server、超时、环境变量和工具过滤。</p>
+        <McpEditor
+          servers={draft.mcp_servers}
+          onChange={(mcpServers) => patch((next) => { next.mcp_servers = mcpServers; })}
+        />
+      </section>
+
       <div className="config-save-bar">
         <div className={cn("config-save-status", validationIssue && "is-error")}>
           {validationIssue ?? (dirty ? "配置有尚未保存的更改" : "配置已是最新状态")}
@@ -346,6 +447,292 @@ function VisualConfig() {
           {saved ? "已保存" : saving ? "保存中..." : "保存配置"}
         </Button>
       </div>
+    </div>
+  );
+}
+
+function WebEditor({ web, onChange }: { web: WebDto; onChange: (web: WebDto) => void }) {
+  const update = (fn: (next: WebDto) => void) => {
+    const next = structuredClone(web);
+    fn(next);
+    onChange(next);
+  };
+  const addBackend = () => {
+    const name = WEB_BACKENDS.find((candidate) => !web.backends.some((item) => item.name === candidate));
+    if (!name) return;
+    const backend = emptyWebBackend();
+    backend.name = name;
+    update((next) => { next.backends.push(backend); });
+  };
+
+  return (
+    <div className="config-section-surface config-editor-stack">
+      <div className="settings-grid-2">
+        <div className="settings-field">
+          <Label className="settings-field-label">搜索模式</Label>
+          <select
+            className={SELECT_CLASS}
+            value={web.mode ?? "auto"}
+            onChange={(event) => update((next) => { next.mode = event.target.value; })}
+          >
+            <option value="auto">自动</option>
+            <option value="native">仅模型原生搜索</option>
+            <option value="external">仅外部搜索</option>
+            <option value="disabled">禁用</option>
+          </select>
+        </div>
+        <div className="settings-field">
+          <Label className="settings-field-label">结果上下文量</Label>
+          <select
+            className={SELECT_CLASS}
+            value={web.context_size ?? ""}
+            onChange={(event) => update((next) => { next.context_size = event.target.value || null; })}
+          >
+            <option value="">服务默认</option>
+            <option value="low">Low（最多 3 条）</option>
+            <option value="medium">Medium（最多 5 条）</option>
+            <option value="high">High（最多 10 条）</option>
+          </select>
+        </div>
+        <div className="settings-field">
+          <Label className="settings-field-label">外部厂商优先级（逗号分隔）</Label>
+          <Input
+            value={web.external_backends.join(", ")}
+            placeholder="tavily, brave, exa, serper"
+            spellCheck={false}
+            onChange={(event) => update((next) => { next.external_backends = commaList(event.target.value); })}
+          />
+        </div>
+        <div className="settings-field">
+          <Label className="settings-field-label">允许域名（逗号分隔）</Label>
+          <Input
+            value={web.allowed_domains.join(", ")}
+            placeholder="developers.openai.com, platform.openai.com"
+            spellCheck={false}
+            onChange={(event) => update((next) => { next.allowed_domains = commaList(event.target.value); })}
+          />
+        </div>
+      </div>
+
+      <div className="config-switch-row config-subsection-divider">
+        <div>
+          <div className="settings-row-label">位置提示</div>
+          <div className="settings-row-hint">向搜索服务提供固定的本地位置</div>
+        </div>
+        <Switch
+          checked={web.location !== null}
+          onCheckedChange={(enabled) => update((next) => {
+            next.location = enabled
+              ? { country: null, region: null, city: null, timezone: null }
+              : null;
+          })}
+        />
+      </div>
+      {web.location && (
+        <div className="settings-grid-2">
+          {(["country", "region", "city", "timezone"] as const).map((key) => (
+            <div className="settings-field" key={key}>
+              <Label className="settings-field-label">
+                {{ country: "国家/地区代码", region: "州/省", city: "城市", timezone: "时区" }[key]}
+              </Label>
+              <Input
+                value={web.location?.[key] ?? ""}
+                placeholder={{ country: "CN", region: "Shanghai", city: "Shanghai", timezone: "Asia/Shanghai" }[key]}
+                spellCheck={false}
+                onChange={(event) => update((next) => {
+                  if (next.location) next.location[key] = event.target.value || null;
+                })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="config-subsection-heading config-subsection-divider">
+        <div>
+          <h4>外部搜索凭据</h4>
+          <p>未填写时使用厂商标准环境变量。</p>
+        </div>
+        <Button variant="outline" size="sm" onClick={addBackend} disabled={web.backends.length >= WEB_BACKENDS.length}>
+          <Plus size={13} /> 添加厂商
+        </Button>
+      </div>
+      <div className="config-credential-list">
+        {web.backends.map((backend, index) => (
+          <div className="config-credential-row" key={index}>
+            <select
+              className={SELECT_CLASS}
+              value={backend.name}
+              aria-label="厂商名称"
+              onChange={(event) => update((next) => { next.backends[index].name = event.target.value; })}
+            >
+              {!WEB_BACKENDS.includes(backend.name) && <option value={backend.name}>{backend.name}</option>}
+              {WEB_BACKENDS.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <Input
+              value={backend.api_key_env ?? ""}
+              placeholder="API_KEY 环境变量"
+              spellCheck={false}
+              aria-label={`${backend.name || "厂商"} API Key 环境变量`}
+              onChange={(event) => update((next) => {
+                next.backends[index].api_key_env = event.target.value || null;
+                if (event.target.value) next.backends[index].api_key = null;
+              })}
+            />
+            <Input
+              type="password"
+              value={backend.api_key ?? ""}
+              placeholder="或直接填写 API Key"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label={`${backend.name || "厂商"} API Key`}
+              onChange={(event) => update((next) => {
+                next.backends[index].api_key = event.target.value || null;
+                if (event.target.value) next.backends[index].api_key_env = null;
+              })}
+            />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="config-danger-button"
+              title="删除搜索厂商"
+              onClick={() => update((next) => { next.backends.splice(index, 1); })}
+            >
+              <Trash2 size={13} />
+            </Button>
+          </div>
+        ))}
+        {web.backends.length === 0 && <div className="config-model-empty">使用标准环境变量，无自定义凭据。</div>}
+      </div>
+    </div>
+  );
+}
+
+function McpEditor({
+  servers,
+  onChange,
+}: {
+  servers: McpServerDto[];
+  onChange: (servers: McpServerDto[]) => void;
+}) {
+  const update = (fn: (next: McpServerDto[]) => void) => {
+    const next = structuredClone(servers);
+    fn(next);
+    onChange(next);
+  };
+  const addServer = () => {
+    const server = emptyMcpServer();
+    server.name = nextAvailableName("server", servers.map((item) => item.name));
+    update((next) => { next.push(server); });
+  };
+
+  return (
+    <div className="config-mcp-editor">
+      {servers.map((server, index) => (
+        <div className="config-section-surface config-mcp-server" key={index}>
+          <div className="config-mcp-header">
+            <span className="config-provider-icon"><Server size={14} /></span>
+            <div className="config-mcp-title">
+              <strong>{server.name || "未命名 server"}</strong>
+              <span>{server.command || "尚未配置启动命令"}</span>
+            </div>
+            <Switch
+              checked={server.enabled ?? true}
+              onCheckedChange={(enabled) => update((next) => { next[index].enabled = enabled; })}
+              aria-label={`启用 ${server.name || "MCP server"}`}
+            />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="config-danger-button"
+              title="删除 MCP server"
+              onClick={() => update((next) => { next.splice(index, 1); })}
+            >
+              <Trash2 size={13} />
+            </Button>
+          </div>
+          <div className="settings-grid-2">
+            <div className="settings-field">
+              <Label className="settings-field-label">名称</Label>
+              <Input value={server.name} spellCheck={false} placeholder="playwright" onChange={(event) => update((next) => { next[index].name = event.target.value; })} />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">启动命令</Label>
+              <Input value={server.command} spellCheck={false} placeholder="cmd" onChange={(event) => update((next) => { next[index].command = event.target.value; })} />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">工作目录（可选）</Label>
+              <Input value={server.cwd ?? ""} spellCheck={false} placeholder="E:/workspace" onChange={(event) => update((next) => { next[index].cwd = event.target.value || null; })} />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">启动超时（毫秒）</Label>
+              <Input type="number" min={1} value={server.startup_timeout_ms ?? ""} placeholder="30000" onChange={(event) => update((next) => { next[index].startup_timeout_ms = event.target.value ? Number(event.target.value) : null; })} />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">调用超时（毫秒）</Label>
+              <Input type="number" min={1} value={server.call_timeout_ms ?? ""} placeholder="60000" onChange={(event) => update((next) => { next[index].call_timeout_ms = event.target.value ? Number(event.target.value) : null; })} />
+            </div>
+            <div className="settings-field config-inline-switch-field">
+              <div>
+                <Label className="settings-field-label">始终审批</Label>
+                <span className="config-field-hint">该 server 的所有工具逐次审批</span>
+              </div>
+              <Switch checked={server.always_ask ?? false} onCheckedChange={(alwaysAsk) => update((next) => { next[index].always_ask = alwaysAsk; })} />
+            </div>
+          </div>
+          <div className="settings-grid-2">
+            <div className="settings-field">
+              <Label className="settings-field-label">启动参数（每行一个）</Label>
+              <Textarea
+                className="mono config-list-textarea"
+                value={server.args.join("\n")}
+                placeholder={"/c\nnpx\n-y\n@playwright/mcp@latest"}
+                spellCheck={false}
+                onChange={(event) => update((next) => { next[index].args = event.target.value.split(/\r?\n/).filter((item) => item.length > 0); })}
+              />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">环境变量（每行 KEY=VALUE）</Label>
+              <Textarea
+                className="mono config-list-textarea"
+                value={envText(server.env)}
+                placeholder="DEBUG=1"
+                spellCheck={false}
+                onChange={(event) => update((next) => { next[index].env = parseEnv(event.target.value); })}
+              />
+            </div>
+          </div>
+          <div className="config-switch-row config-subsection-divider">
+            <div>
+              <div className="settings-row-label">启用工具白名单</div>
+              <div className="settings-row-hint">开启后只注册列出的工具；空列表表示不注册任何工具</div>
+            </div>
+            <Switch
+              checked={server.include_tools !== null}
+              onCheckedChange={(enabled) => update((next) => { next[index].include_tools = enabled ? [] : null; })}
+            />
+          </div>
+          <div className="settings-grid-2">
+            <div className="settings-field">
+              <Label className="settings-field-label">包含工具（逗号分隔）</Label>
+              <Input
+                value={(server.include_tools ?? []).join(", ")}
+                disabled={server.include_tools === null}
+                spellCheck={false}
+                onChange={(event) => update((next) => { next[index].include_tools = commaList(event.target.value); })}
+              />
+            </div>
+            <div className="settings-field">
+              <Label className="settings-field-label">排除工具（逗号分隔）</Label>
+              <Input value={server.exclude_tools.join(", ")} spellCheck={false} onChange={(event) => update((next) => { next[index].exclude_tools = commaList(event.target.value); })} />
+            </div>
+          </div>
+        </div>
+      ))}
+      {servers.length === 0 && <div className="config-provider-empty"><div><Server size={18} /><strong>没有 MCP server</strong></div><span>添加后会在新启动的任务中装配其工具。</span></div>}
+      <Button variant="outline" size="sm" className="config-add-provider" onClick={addServer}>
+        <Plus size={13} /> 添加 MCP Server
+      </Button>
     </div>
   );
 }
@@ -574,11 +961,11 @@ function ProvidersEditor({
                     </div>
                     <div className="settings-field">
                       <Label className="settings-field-label">API Key 环境变量</Label>
-                      <Input value={provider.api_key_env ?? ""} placeholder="OPENAI_API_KEY" spellCheck={false} onChange={(event) => updateProvider(providerIndex, (next) => { next.api_key_env = event.target.value || null; })} />
+                      <Input value={provider.api_key_env ?? ""} placeholder="OPENAI_API_KEY" spellCheck={false} onChange={(event) => updateProvider(providerIndex, (next) => { next.api_key_env = event.target.value || null; if (event.target.value) next.api_key = null; })} />
                     </div>
                     <div className="settings-field">
                       <Label className="settings-field-label">API Key（直接填写）</Label>
-                      <Input type="password" value={provider.api_key ?? ""} autoComplete="off" spellCheck={false} placeholder="优先建议使用环境变量" onChange={(event) => updateProvider(providerIndex, (next) => { next.api_key = event.target.value || null; })} />
+                      <Input type="password" value={provider.api_key ?? ""} autoComplete="off" spellCheck={false} placeholder="优先建议使用环境变量" onChange={(event) => updateProvider(providerIndex, (next) => { next.api_key = event.target.value || null; if (event.target.value) next.api_key_env = null; })} />
                     </div>
                   </div>
 
@@ -729,7 +1116,7 @@ function RawConfig() {
     <div>
       <div className="settings-section">
         <p className="settings-section-desc">
-          直接编辑 config.toml（保留全部注释）。保存后新会话生效。可视化编辑会重写部分结构并可能丢失注释，建议优先使用此模式保留自定义内容。
+          直接编辑 config.toml（保留全部注释）。保存只影响之后新建或重启的任务；可视化编辑会增量更新其管理的字段并保留其他配置。
         </p>
         <Textarea
           className="mono h-[420px] resize-none text-[12.5px]"

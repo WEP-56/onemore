@@ -1,6 +1,6 @@
 [package]
 name = "onemore-gui"
-version = "0.1.2"
+version = "0.2.0"
 description = "Onemore coding agent GUI"
 edition = "2021"
 

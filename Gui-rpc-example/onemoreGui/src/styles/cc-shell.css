@@ -236,14 +236,19 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  max-width: min(280px, 32vw);
   margin-right: 5px;
+  overflow: hidden;
   color: var(--status-warning);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar-phase > span {
   width: 6px;
   height: 6px;
+  flex: 0 0 auto;
   border-radius: 50%;
   background: currentColor;
   animation: dotPulse 1.2s ease-in-out infinite;
@@ -596,6 +601,26 @@ button {
 
 .thread-meta {
   font-size: 10px;
+}
+
+.thread-task-status {
+  display: inline-flex;
+  flex: 0 0 12px;
+  align-items: center;
+  justify-content: center;
+}
+
+.thread-task-status.running,
+.thread-task-status.completed {
+  color: var(--status-success);
+}
+
+.thread-task-status.waiting_approval {
+  color: var(--status-warning);
+}
+
+.thread-task-status.failed {
+  color: var(--status-error);
 }
 
 .sidebar-empty {
@@ -1389,6 +1414,83 @@ button {
   border-bottom: 1px solid var(--om-border);
 }
 
+.config-editor-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.config-credential-list {
+  display: grid;
+  gap: 8px;
+}
+
+.config-credential-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.7fr) minmax(150px, 1fr) minmax(150px, 1fr) 28px;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-mcp-editor {
+  border-top: 1px solid var(--om-border);
+}
+
+.config-mcp-server {
+  display: grid;
+  gap: 14px;
+  border-top: 0;
+}
+
+.config-mcp-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.config-mcp-title {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.config-mcp-title strong,
+.config-mcp-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-mcp-title strong {
+  color: var(--text-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.config-mcp-title span {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.config-inline-switch-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.config-inline-switch-field > div {
+  display: grid;
+  gap: 3px;
+}
+
+.config-list-textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-size: 11.5px;
+}
+
 .config-wide-field {
   margin-top: 12px;
 }
@@ -1737,6 +1839,15 @@ button {
 
   .config-provider-body {
     padding-inline: 26px;
+  }
+
+  .config-credential-row {
+    grid-template-columns: minmax(0, 1fr) 28px;
+  }
+
+  .config-credential-row > :nth-child(2),
+  .config-credential-row > :nth-child(3) {
+    grid-column: 1 / -1;
   }
 
   .config-save-bar {

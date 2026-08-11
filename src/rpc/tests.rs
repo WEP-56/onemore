@@ -21,6 +21,7 @@ use crate::workspace::Workspace;
 enum ProviderStep {
     Reply(String),
     ToolCall,
+    ToolCallNamed(String),
     Gate {
         started: std::sync::mpsc::Sender<()>,
         release: Receiver<()>,
@@ -45,7 +46,7 @@ impl Provider for RpcTestProvider {
         &self,
         _prompt: &PromptContext,
         _tools: &[ToolSpec],
-        _on_event: &mut dyn FnMut(ProviderEvent),
+        on_event: &mut dyn FnMut(ProviderEvent),
         _cancel: &AtomicBool,
     ) -> StreamTerminal {
         let step = self
@@ -59,19 +60,8 @@ impl Provider for RpcTestProvider {
                 role: Role::Assistant,
                 blocks: vec![Block::Text(text)],
             }),
-            ProviderStep::ToolCall => StreamTerminal::Done(TurnOutput {
-                message: ChatMessage {
-                    role: Role::Assistant,
-                    blocks: vec![Block::ToolUse {
-                        id: "tool-1".into(),
-                        name: "approval_test".into(),
-                        input: json!({}),
-                    }],
-                },
-                usage: Usage::default(),
-                stop: StopReason::ToolUse,
-                prompt_fingerprint: None,
-            }),
+            ProviderStep::ToolCall => tool_call(on_event, "approval_test"),
+            ProviderStep::ToolCallNamed(name) => tool_call(on_event, &name),
             ProviderStep::Gate {
                 started,
                 release,
@@ -86,6 +76,25 @@ impl Provider for RpcTestProvider {
             }
         }
     }
+}
+
+fn tool_call(on_event: &mut dyn FnMut(ProviderEvent), name: &str) -> StreamTerminal {
+    on_event(ProviderEvent::ToolCallBegun {
+        name: name.to_string(),
+    });
+    StreamTerminal::Done(TurnOutput {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![Block::ToolUse {
+                id: "tool-1".into(),
+                name: name.to_string(),
+                input: json!({}),
+            }],
+        },
+        usage: Usage::default(),
+        stop: StopReason::ToolUse,
+        prompt_fingerprint: None,
+    })
 }
 
 fn done(message: ChatMessage) -> StreamTerminal {
@@ -116,6 +125,30 @@ impl Tool for ApprovalTool {
         _context: &mut ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::text("approved"))
+    }
+}
+
+struct FailingTool {
+    name: String,
+}
+
+impl Tool for FailingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.clone(),
+            description: "test generic remote tool failure".into(),
+            schema: json!({"type": "object", "additionalProperties": false}),
+            capabilities: ToolCapabilities::READ_ONLY,
+            permission: ToolPermissionSpec::default(),
+        }
+    }
+
+    fn execute(
+        &self,
+        _args: &Value,
+        _context: &mut ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::execution("remote click failed"))
     }
 }
 
@@ -422,6 +455,157 @@ fn approval_roundtrip_is_correlated_and_duplicate_response_fails_closed() {
             && frame.pointer("/event/progress/output/summary") == Some(&json!("approved"))
             && frame.pointer("/event/progress/output/metadata/command") == Some(&Value::Null)
     }));
+    shutdown(input, &bytes, join);
+}
+
+#[test]
+fn failed_mcp_named_tool_uses_generic_tool_events_and_transcript_output() {
+    let tool_name = "mcp__browser__click";
+    let agent = test_agent(
+        vec![
+            ProviderStep::ToolCallNamed(tool_name.into()),
+            ProviderStep::Reply("recovered".into()),
+        ],
+        ToolRegistry::new(vec![Box::new(FailingTool {
+            name: tool_name.into(),
+        })]),
+    );
+    let (input, bytes, join) = start_server(agent);
+    send(&input, json!({"type": "hello", "version": 3}));
+    wait_for(&bytes, |frames| !frames.is_empty());
+    send(
+        &input,
+        json!({"type": "request", "id": "prompt", "request": {"command": "prompt", "text": "click"}}),
+    );
+    let current = wait_for(&bytes, |frames| {
+        has_response(frames, "prompt", true)
+            && frames
+                .iter()
+                .any(|frame| frame.pointer("/event/type") == Some(&json!("settled")))
+    });
+
+    for progress_type in ["tool_call_pending", "tool_started", "tool_finished"] {
+        assert!(current.iter().any(|frame| {
+            frame.pointer("/event/progress/type") == Some(&json!(progress_type))
+                && frame.pointer("/event/progress/name") == Some(&json!(tool_name))
+        }));
+    }
+    assert!(current.iter().any(|frame| {
+        frame.pointer("/event/progress/type") == Some(&json!("tool_finished"))
+            && frame.pointer("/event/progress/output/content")
+                == Some(&json!("remote click failed"))
+            && frame.pointer("/event/progress/error/code") == Some(&json!("execution_failed"))
+    }));
+    let settled_snapshot = current
+        .iter()
+        .rev()
+        .find(|frame| {
+            frame.pointer("/event/type") == Some(&json!("session_snapshot"))
+                && frame.pointer("/event/snapshot/phase") == Some(&json!("idle"))
+        })
+        .unwrap();
+    let transcript = settled_snapshot
+        .pointer("/event/snapshot/transcript")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(transcript.iter().any(|item| {
+        item["type"] == "tool"
+            && item["name"] == tool_name
+            && item["status"] == "failed"
+            && item["output"] == "remote click failed"
+            && item.get("error").is_none()
+    }));
+
+    shutdown(input, &bytes, join);
+}
+
+#[test]
+fn queued_input_and_session_load_are_snapshot_only_on_the_wire() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let agent = test_agent(
+        vec![
+            ProviderStep::Gate {
+                started: started_tx,
+                release: release_rx,
+                text: "first answer".into(),
+            },
+            ProviderStep::Reply("steered answer".into()),
+        ],
+        ToolRegistry::new(Vec::new()),
+    );
+    let (input, bytes, join) = start_server(agent);
+    send(&input, json!({"type": "hello", "version": 3}));
+    let hello = wait_for(&bytes, |frames| {
+        frames.iter().any(|frame| frame["type"] == "hello")
+    });
+    let session_id = hello
+        .iter()
+        .find(|frame| frame["type"] == "hello")
+        .and_then(|frame| frame.pointer("/snapshot/session_id"))
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+
+    send(
+        &input,
+        json!({"type": "request", "id": "prompt", "request": {"command": "prompt", "text": "start"}}),
+    );
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    send(
+        &input,
+        json!({"type": "request", "id": "steer", "request": {"command": "steer", "text": "change direction"}}),
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    release_tx.send(()).unwrap();
+    let current = wait_for(&bytes, |frames| {
+        has_response(frames, "steer", true)
+            && frames
+                .iter()
+                .any(|frame| frame.pointer("/event/type") == Some(&json!("settled")))
+    });
+    assert!(current.iter().any(|frame| {
+        frame
+            .pointer("/event/snapshot/queues/steering")
+            .and_then(Value::as_array)
+            .is_some_and(|queue| queue.iter().any(|item| item["text"] == "change direction"))
+    }));
+    assert!(!current.iter().any(|frame| {
+        matches!(
+            frame
+                .pointer("/event/progress/type")
+                .and_then(Value::as_str),
+            Some("input_queued" | "input_dequeued")
+        )
+    }));
+
+    let before_load = current.len();
+    let settled_before = current
+        .iter()
+        .filter(|frame| frame.pointer("/event/type") == Some(&json!("settled")))
+        .count();
+    send(
+        &input,
+        json!({"type": "request", "id": "load", "request": {"command": "load_session", "session_id": session_id}}),
+    );
+    let loaded = wait_for(&bytes, |frames| {
+        has_response(frames, "load", true)
+            && frames
+                .iter()
+                .filter(|frame| frame.pointer("/event/type") == Some(&json!("settled")))
+                .count()
+                > settled_before
+    });
+    let load_frames = &loaded[before_load..];
+    assert!(!load_frames
+        .iter()
+        .any(|frame| { frame.pointer("/event/progress/type") == Some(&json!("session_loaded")) }));
+    assert!(load_frames.iter().any(|frame| {
+        frame.pointer("/event/type") == Some(&json!("session_snapshot"))
+            && frame.pointer("/event/snapshot/session_id") == Some(&json!(session_id))
+            && frame.pointer("/event/snapshot/phase") == Some(&json!("idle"))
+    }));
+
     shutdown(input, &bytes, join);
 }
 

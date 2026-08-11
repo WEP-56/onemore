@@ -1,7 +1,7 @@
 # OneMore SDK 与 JSONL RPC 设计
 
 状态：RPC/SDK v3 已实现
-更新时间：2026-08-10
+更新时间：2026-08-11（与实现对账：补齐事件全集、审批结构化字段、前端专属命令边界与 MCP 呈现规则）
 
 本文定义 OneMore 下一阶段的本地 SDK 边界和首版 JSONL RPC 协议。目标不是复制 Pi 的
 全部 server、client 或扩展系统，而是在现有弱 harness 上建立一个长期可维护的外部入口：
@@ -89,22 +89,23 @@ impl SessionController {
     pub fn list_sessions(&self) -> Result<Vec<SessionSummaryView>, SessionError>;
     pub fn list_all_sessions(&self) -> Result<Vec<SessionSummaryView>, SessionError>;
     pub fn load_session(&self, id: impl Into<String>) -> Result<CommandReceipt, SessionError>;
-    pub fn list_models(&self) -> Result<Vec<ModelMetadata>, SessionError>;
+    pub fn list_models(&self) -> Vec<ModelMetadata>;
+    pub fn server_info(&self) -> ServerInfo;
 
     pub fn snapshot(&self) -> Result<SessionSnapshot, SessionError>;
     pub fn respond_to_approval(
         &self,
-        response: ApprovalResponse,
+        response: ApprovalResponseView,
     ) -> Result<(), SessionError>;
     pub fn wait_until_settled(
         &self,
         timeout: Duration,
     ) -> Result<SessionSnapshot, SessionError>;
-    pub fn shutdown(&self) -> Result<(), SessionError>;
+    pub fn shutdown(&self) -> Result<CommandReceipt, SessionError>;
 }
 
 impl SessionEvents {
-    pub fn recv(&mut self) -> Result<SessionEvent, SessionDisconnected>;
+    pub fn recv(&mut self) -> Result<SessionEvent, RecvError>;
     pub fn recv_timeout(
         &mut self,
         timeout: Duration,
@@ -120,7 +121,9 @@ impl SessionEvents {
 - query 方法必须由 Runtime 线程读取权威状态，不能读取启动时复制出的旧元数据。
 - `wait_until_settled` 不消费调用方的事件流，应由 Runtime 内部状态通知完成。
 - 所有 mutation 都分配稳定的 `command_id`；事件可用它关联命令。
-- `RuntimeHandle` 中公开的 sender、receiver、`AtomicBool` 最终变成私有实现细节。
+- 裸 sender、receiver 与取消 `AtomicBool` 已是私有实现细节，不再公开。
+- TUI 经 crate 内部通道提交完整 `AgentCommand`（含 `Reload`、`McpStatus` 等前端专属
+  命令）；该通道不属于公共 SDK 面，嵌入方与 RPC 只使用上述方法与 v3 命令集。
 
 ## 4. 命令接纳与完成语义
 
@@ -202,6 +205,8 @@ ModelMetadata
 ```
 
 模型信息不得包含 API key、认证状态原文、base URL、请求 headers 或 provider 私有配置。
+`capabilities` 首版固定为上述五项；Web 搜索绑定与 MCP server 装配状态不进入结构化
+capabilities，以 `notice` 文本事件呈现（见 §5.6、§5.7）。
 
 ### 5.2 SessionSnapshot
 
@@ -265,10 +270,12 @@ TranscriptItem
     id, parent_id, created_at, blocks, status
 
   tool
-    tool_call_id, name, summary, status, output?, error?
+    tool_call_id, name, summary, status, output?
+    // status = succeeded | failed;失败时 output 携带错误正文,没有独立 error 字段
 
   notice
     id, created_at, level, text
+    // level = info | warning | error;compaction 与 model change 事实也投影为 notice
 ```
 
 assistant block 首版只包含：
@@ -282,7 +289,9 @@ assistant block 首版只包含：
 - `Block::Thinking.raw` 和 `provider_kind`；
 - provider 原始 response item、加密 reasoning 或 headers；
 - 未校验的工具参数原文；工具调用只暴露人类可读 `summary`；
-- `ToolOutput.model_text` 与任意 `details` 的原始 JSON。首版只暴露清洗后的 UI output；
+- 任意 `ToolOutput.details` 的原始 JSON。工具正文只暴露清洗且限长后的模型可见
+  内容(`ToolOutputView.content` 与 transcript 的 `tool.output` 都是这一份),
+  display metadata 走 §5.6 的 allowlist；
 - compaction prompt、system prompt、完整 context、prompt cache key；
 - SQLite 文件路径、连接信息、内部 sequence 和 schema version。
 
@@ -314,6 +323,9 @@ ApprovalRequestView
   summary: String
   reason: String
   scopes: Vec<ApprovalScopeView>
+  command: Option<String>        // 命令类审批的规范化命令行
+  cwd: Option<String>            // 命令类审批的工作目录
+  targets: Vec<String>           // 路径类审批的目标列表
 
 ApprovalScopeView
   once | session
@@ -322,8 +334,9 @@ ApprovalDecisionView
   allow_once | allow_session | deny
 ```
 
-审批只暴露当前权限系统已经生成的 summary 和 reason，不补充原始工具参数。RPC 输入结束、输出
-断开、client 退出或审批响应通道关闭时，一律按 deny 收尾，并产生 ToolResult。
+审批只暴露权限系统已经生成的 summary、reason 与结构化展示字段(command/cwd/targets),
+不补充原始工具参数 JSON。RPC 输入结束、输出断开、client 退出或审批响应通道关闭时,
+一律按 deny 收尾,并产生 ToolResult。
 
 ### 5.6 SessionEvent
 
@@ -340,6 +353,7 @@ CommandStatus
   succeeded | failed | cancelled
 
 ProgressEvent
+  user_message { text }
   run_started { command_id }
   retry_scheduled { attempt, max_retries, delay_ms, error }
   retry_started { attempt, max_retries }
@@ -347,12 +361,21 @@ ProgressEvent
   compaction_finished { compaction_id, trigger, tokens_before, summary_chars, retained_messages }
   compaction_failed { compaction_id, trigger, error, cancelled, history_changed }
   assistant_delta { message_id, content_index, kind, delta }
+  assistant_finished { message_id, text }
+  tool_call_pending { name }
   tool_started { tool_call_id, name, summary }
   tool_updated { tool_call_id, name, output }
   tool_finished { tool_call_id, name, output, error? }
   approval_requested { request }
   approval_resolved { request_id, allowed }
   notice { level, text }
+  error { error }
+  plan_updated { plan }
+  skills_discovered { skills, warnings }
+  usage { usage }
+  conversation_cleared
+  model_selection_changed { selection }
+  sessions_listed { current_id, sessions }
 
 ToolOutputView
   content
@@ -362,7 +385,13 @@ ToolOutputView
 
 约束：
 
-- delta 只携带新增片段，不携带累计 assistant message。
+- delta 只携带新增片段，不携带累计 assistant message；`assistant_finished` 携带该消息
+  全文，客户端可用它兜底校正 delta 组装。
+- `notice.level` 取值 info | warning | error；runtime 即时提示(含 Web capability、
+  MCP server 启动/降级/列表变化)固定为 info，分级只用于持久化 notice 事实的投影。
+- `error` 事件是本轮失败的稳定表达(code + message)，并使关联命令以 failed 终态结束。
+- 排队输入(steering/follow-up)的变化不发独立 progress，只反映在 snapshot 的
+  `queues`；`session_loaded` 也以全量 `session_snapshot` 呈现，不设专用事件。
 - `retry_scheduled` 前先发布 phase=`retrying` 的 snapshot；`retry_started` 前恢复到
   phase=`running`，压缩调用内的重试则恢复到 phase=`compacting`。客户端无需从 Notice 文本
   猜测重试或压缩状态。
@@ -375,6 +404,23 @@ ToolOutputView
   长度限制的模型正文，`summary` 用于紧凑状态行，`metadata` 只允许命令、工作目录、耗时和
   退出码；工具任意 `details`、provider raw 和未完成参数不得穿过 SDK/RPC 边界。
 - 错误使用稳定 `code + message`；内部 anyhow chain 只写 stderr，不进入协议。
+
+### 5.7 MCP 工具的呈现
+
+MCP 接入(见 `docs/planning/mcp-client-plan.md`)不扩张 SDK/RPC 协议面，全部经既有
+类型呈现：
+
+- 远端工具以 `mcp__{server}__{tool}` 名字出现在 `tool_call_pending`、`tool_started`、
+  `tool_updated`、`tool_finished`、审批请求与 transcript 中；名字前缀就是来源标注,
+  不设结构化 MCP DTO,`capabilities` 也不含 MCP 标志。
+- 审批照常走 `approval_requested`(scopes 含 once 与 session;session 授权按工具名
+  生效是权限层语义,对协议不可见)。
+- server 启动/降级、`list_changed` 提醒与 `/mcp` 状态输出都是 `notice` 文本事件。
+- MCP 工具的 `details`(来源 server、structuredContent、被丢弃内容块清单)受 §5.6
+  allowlist 约束,不穿过 SDK 边界;图像内容块的落盘路径写在 `content` 正文中,
+  所有前端都能看到。
+- server 会话中死亡表现为该工具的 `tool_finished` 携带稳定 error;恢复需要 TUI 侧
+  `/reload`(见 §6.4 前端专属命令),RPC 会话内没有对应命令。
 
 ## 6. JSONL RPC v3
 
@@ -467,6 +513,13 @@ shutdown
 
 首版不提供 `cycle_model`、`cycle_effort` 等 UI convenience command；客户端读取模型目录后明确
 提交目标值。也不提供任意 slash command RPC，slash 解析继续属于具体 CLI 前端。
+
+**前端专属命令**：`/reload`(重载配置、context、skills、Web binding 与 MCP servers)与
+`/mcp`(MCP server 状态)只存在于 TUI，经 crate 内部通道提交 `AgentCommand`，刻意不在
+v3 命令集也不在公共 SDK 方法中——reload 会整体替换工具声明与 prompt identity(capability
+epoch 边界)，RPC 客户端应重启进程获得等效语义。若未来需要远程触发，按 §8 升协议版本
+新增命令，不在 v3 内扩张。它们的输出(reload 结果、MCP 状态行)以 `notice` 事件对全部
+前端可见。
 
 query 命令在 response 的 `result` 中返回数据，不产生 `command_id`。mutation 命令返回
 `command_id`，完成状态通过事件报告。`shutdown` 成功 response flush 后再退出。
@@ -561,7 +614,7 @@ snapshot 的 `queues.steering` 随后包含 `cmd-2`。它在完整工具批提�
 server：
 
 ```json
-{"type":"event","event":{"type":"progress","progress":{"type":"approval_requested","request":{"request_id":"approval-1","tool":"run_command","summary":"cargo test --locked","reason":"command execution requires approval","scopes":["once","session"]}}}}
+{"type":"event","event":{"type":"progress","progress":{"type":"approval_requested","request":{"request_id":"approval-1","tool":"run_command","summary":"command=cargo test --locked","reason":"shell 命令执行","scopes":["once","session"],"command":"cargo test --locked","cwd":null,"targets":[]}}}}
 ```
 
 client：

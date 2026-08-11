@@ -69,15 +69,21 @@ npm run tauri dev
 
 | 功能 | 说明 |
 |---|---|
-| RPC 连接 | 复用完整 JSONL 协议栈，不经 shell 启动 `onemore --rpc` 子进程 |
+| RPC 连接 | 每个受管任务使用独立 `onemore --rpc` 子进程；切换会话时后台 loop/审批继续保留 |
 | 工作区管理 | 持久化工作区列表，左栏展示/添加/移除，点击即连接 |
 | 会话管理 | 扫描 `roaming/onemore/sessions/*.db`，跨 workspace 列出历史会话 |
-| 对话 | 流式 transcript（snapshot 权威 + progress 增量）、steer / abort |
-| 审批 | 阻塞式 modal，Allow Once / Allow Session / Deny |
-| config.toml | 设置弹窗直接编辑 `roaming/onemore/config.toml` |
+| 对话 | 完整 RPC v3 progress 投影、snapshot 权威校正、steer / abort |
+| 审批 | 非阻塞浮层，展示 command/cwd/targets，支持 Once / Session / Deny |
+| config.toml | 可视化编辑 agent/retry/compaction/permissions/providers、Web 搜索和 MCP servers，也可直接编辑原始 TOML |
 | Git 状态 | 右栏显示分支、ahead/behind、文件变更列表 |
 | 文件树 | 右栏展示工作区文件树（尊重 .gitignore） |
 | 计划 | 右栏展示当前 session 的执行计划与进度 |
+
+远端 MCP 工具不扩张 GUI 协议：继续以 `mcp__{server}__{tool}` 名称走通用 tool 卡片、审批与
+notice；失败正文读取 `output.content`，任意 MCP `details` 不进入前端。
+
+侧栏会显示后台任务的运行、等待审批、失败和完成状态。配置保存只影响之后新建或重启的 RPC
+任务；已经运行的子进程继续使用其启动时加载的配置。
 
 ## 三栏布局
 

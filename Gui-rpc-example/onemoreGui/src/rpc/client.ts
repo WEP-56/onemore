@@ -18,11 +18,11 @@ export interface GuiErrorDto {
 
 /// backend 发送的封闭事件 DTO（RpcEvent 的序列化形状）。
 export type BackendEvent =
-  | { kind: "hello"; server: ServerInfo; snapshot: SessionSnapshot }
-  | { kind: "event"; event: SessionEvent }
-  | { kind: "stderr"; line: string }
-  | { kind: "process_exit"; code: number | null }
-  | { kind: "transport_error"; code: string; message: string };
+  | { kind: "hello"; connection_id: string; server: ServerInfo; snapshot: SessionSnapshot }
+  | { kind: "event"; connection_id: string; event: SessionEvent }
+  | { kind: "stderr"; connection_id: string; line: string }
+  | { kind: "process_exit"; connection_id: string; code: number | null }
+  | { kind: "transport_error"; connection_id: string; code: string; message: string };
 
 const EVENT_NAME = "onemore://rpc-event";
 
@@ -30,27 +30,28 @@ export function subscribeBackend(handler: (e: BackendEvent) => void): Promise<()
   return listen<BackendEvent>(EVENT_NAME, (ev) => handler(ev.payload));
 }
 
-export async function rpcStart(options: StartOptions): Promise<void> {
-  await invoke("rpc_start", { options });
+export async function rpcStart(connectionId: string, options: StartOptions): Promise<void> {
+  await invoke("rpc_start", { connectionId, options });
 }
 
 export async function rpcRequest<T = unknown>(
+  connectionId: string,
   command: string,
   params?: Record<string, unknown>,
 ): Promise<T> {
-  return invoke<T>("rpc_request", { command, params: params ?? null });
+  return invoke<T>("rpc_request", { connectionId, command, params: params ?? null });
 }
 
-export async function rpcStop(): Promise<void> {
-  await invoke("rpc_stop");
+export async function rpcStop(connectionId: string): Promise<void> {
+  await invoke("rpc_stop", { connectionId });
 }
 
-export async function rpcDiagnosticsTail(limit: number): Promise<string[]> {
-  return invoke<string[]>("rpc_diagnostics_tail", { limit });
+export async function rpcDiagnosticsTail(connectionId: string, limit: number): Promise<string[]> {
+  return invoke<string[]>("rpc_diagnostics_tail", { connectionId, limit });
 }
 
-export async function rpcSnapshot(): Promise<SessionSnapshot | null> {
-  return invoke<SessionSnapshot | null>("rpc_snapshot");
+export async function rpcSnapshot(connectionId: string): Promise<SessionSnapshot | null> {
+  return invoke<SessionSnapshot | null>("rpc_snapshot", { connectionId });
 }
 
 export function toErrorMessage(e: unknown): GuiErrorDto {

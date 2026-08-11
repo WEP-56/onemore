@@ -23,19 +23,33 @@ use error::GuiError;
 async fn rpc_start(
     app: AppHandle,
     state: State<'_, RpcState>,
+    connection_id: String,
     options: StartOptions,
 ) -> Result<serde_json::Value, GuiError> {
-    let handle = spawn_rpc(app.clone(), options)?;
-    let mut guard = state.inner.lock().unwrap();
-    if let Some(old) = guard.replace(handle) {
-        drop(tauri::async_runtime::spawn_blocking(move || shutdown(old)));
+    if state.inner.lock().unwrap().contains_key(&connection_id) {
+        return Err(GuiError::new(
+            "connection_exists",
+            format!("RPC connection {connection_id} 已存在"),
+        ));
     }
-    Ok(serde_json::json!({ "ok": true }))
+    let handle = spawn_rpc(app.clone(), connection_id.clone(), options)?;
+    let mut guard = state.inner.lock().unwrap();
+    if let std::collections::hash_map::Entry::Vacant(entry) = guard.entry(connection_id.clone()) {
+        entry.insert(handle);
+    } else {
+        drop(guard);
+        drop(tauri::async_runtime::spawn_blocking(move || {
+            shutdown(handle)
+        }));
+        return Err(GuiError::new("connection_exists", "RPC connection 已存在"));
+    }
+    Ok(serde_json::json!({ "ok": true, "connection_id": connection_id }))
 }
 
 #[tauri::command]
 async fn rpc_request(
     state: State<'_, RpcState>,
+    connection_id: String,
     command: String,
     params: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, GuiError> {
@@ -43,7 +57,7 @@ async fn rpc_request(
         .inner
         .lock()
         .unwrap()
-        .as_ref()
+        .get(&connection_id)
         .map(|h| (h.tx_frame.clone(), h.pending.clone(), h.id_counter.clone()))
         .ok_or_else(|| GuiError::new("not_connected", "尚未连接到 onemore"))?;
     let (tx_frame, pending, id_counter) = handle;
@@ -64,7 +78,10 @@ async fn rpc_request(
             Ok(res) => res,
             Err(_) => {
                 pending.lock().unwrap().remove(&id);
-                Err(GuiError::new("request_timeout", format!("request {id} 超时")))
+                Err(GuiError::new(
+                    "request_timeout",
+                    format!("request {id} 超时"),
+                ))
             }
         }
     })
@@ -73,12 +90,12 @@ async fn rpc_request(
 }
 
 #[tauri::command]
-async fn rpc_stop(state: State<'_, RpcState>) -> Result<(), GuiError> {
+async fn rpc_stop(state: State<'_, RpcState>, connection_id: String) -> Result<(), GuiError> {
     let handle: RpcHandle = state
         .inner
         .lock()
         .unwrap()
-        .take()
+        .remove(&connection_id)
         .ok_or_else(|| GuiError::new("not_connected", "尚未连接到 onemore"))?;
     tauri::async_runtime::spawn_blocking(move || shutdown(handle))
         .await
@@ -88,19 +105,23 @@ async fn rpc_stop(state: State<'_, RpcState>) -> Result<(), GuiError> {
 #[tauri::command]
 async fn rpc_diagnostics_tail(
     state: State<'_, RpcState>,
+    connection_id: String,
     limit: usize,
 ) -> Result<Vec<String>, GuiError> {
     let guard = state.inner.lock().unwrap();
-    match guard.as_ref() {
+    match guard.get(&connection_id) {
         Some(h) => Ok(stderr_tail(h, limit.max(1))),
         None => Ok(Vec::new()),
     }
 }
 
 #[tauri::command]
-async fn rpc_snapshot(state: State<'_, RpcState>) -> Result<Option<serde_json::Value>, GuiError> {
+async fn rpc_snapshot(
+    state: State<'_, RpcState>,
+    connection_id: String,
+) -> Result<Option<serde_json::Value>, GuiError> {
     let guard = state.inner.lock().unwrap();
-    Ok(guard.as_ref().and_then(last_snapshot))
+    Ok(guard.get(&connection_id).and_then(last_snapshot))
 }
 
 // ── Config commands ──
@@ -157,7 +178,10 @@ async fn remove_workspace(path: String) -> Result<workspace::WorkspaceList, GuiE
 }
 
 #[tauri::command]
-async fn rename_workspace(path: String, label: String) -> Result<workspace::WorkspaceList, GuiError> {
+async fn rename_workspace(
+    path: String,
+    label: String,
+) -> Result<workspace::WorkspaceList, GuiError> {
     tauri::async_runtime::spawn_blocking(move || workspace::rename_workspace(&path, &label))
         .await
         .map_err(|e| GuiError::new("join_error", e.to_string()))?
@@ -185,7 +209,10 @@ async fn delete_group(id: String) -> Result<workspace::WorkspaceList, GuiError> 
 }
 
 #[tauri::command]
-async fn assign_group(path: String, group_id: String) -> Result<workspace::WorkspaceList, GuiError> {
+async fn assign_group(
+    path: String,
+    group_id: String,
+) -> Result<workspace::WorkspaceList, GuiError> {
     tauri::async_runtime::spawn_blocking(move || workspace::assign_group(&path, &group_id))
         .await
         .map_err(|e| GuiError::new("join_error", e.to_string()))?
@@ -267,12 +294,12 @@ fn main() {
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
-            let handle = {
+            let handles = {
                 let state = app_handle.state::<RpcState>();
                 let mut guard = state.inner.lock().unwrap();
-                guard.take()
+                guard.drain().map(|(_, handle)| handle).collect::<Vec<_>>()
             };
-            if let Some(handle) = handle {
+            for handle in handles {
                 let _ = shutdown(handle);
             }
         }

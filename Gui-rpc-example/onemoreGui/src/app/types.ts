@@ -7,6 +7,8 @@ import type {
   ServerInfo,
   SessionPhase,
   SessionSnapshot,
+  SessionSummaryView,
+  SkillMetadataView,
   ToolMetadataView,
 } from "../rpc/protocol";
 
@@ -56,6 +58,13 @@ export interface LiveNotice {
   at: number;
 }
 
+export type LiveActivity =
+  | { kind: "tool_call_pending"; name: string }
+  | { kind: "tool"; toolCallId: string; name: string }
+  | { kind: "retry"; attempt: number; maxRetries: number; scheduled: boolean }
+  | { kind: "compaction"; compactionId: string; trigger: "automatic" | "manual" }
+  | null;
+
 export interface RunMetrics {
   startedAt: number | null;
   endedAt: number | null;
@@ -97,12 +106,23 @@ export interface SessionViewState {
   liveUsers: Record<string, LiveUserMessage>;
   liveNotices: LiveNotice[];
   liveApproval: ApprovalRequestView | null;
+  liveActivity: LiveActivity;
+  rpcSessions: SessionSummaryView[];
   run: { commandId: string | null; startedAt: number | null };
   lastTerminal: TerminalRecord | null;
   lastError: { code: string; message: string } | null;
   stderrLines: string[];
   transportIssues: TransportIssue[];
   metrics: RunMetrics;
+}
+
+export interface ManagedRpcTask {
+  connectionId: string;
+  workspace: string;
+  targetSessionId: string | null;
+  view: SessionViewState;
+  skills: SkillMetadataView[];
+  updatedAt: number;
 }
 
 // ── 后端补充类型（非 RPC 协议）──
@@ -186,6 +206,42 @@ export interface PermissionsDto {
   commands: string | null;
 }
 
+export interface WebLocationDto {
+  country: string | null;
+  region: string | null;
+  city: string | null;
+  timezone: string | null;
+}
+
+export interface WebBackendDto {
+  name: string;
+  api_key: string | null;
+  api_key_env: string | null;
+}
+
+export interface WebDto {
+  mode: string | null;
+  external_backends: string[];
+  context_size: string | null;
+  allowed_domains: string[];
+  location: WebLocationDto | null;
+  backends: WebBackendDto[];
+}
+
+export interface McpServerDto {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+  enabled: boolean | null;
+  startup_timeout_ms: number | null;
+  call_timeout_ms: number | null;
+  always_ask: boolean | null;
+  include_tools: string[] | null;
+  exclude_tools: string[];
+}
+
 export interface ModelDto {
   name: string;
   context_window: number | null;
@@ -210,5 +266,7 @@ export interface ConfigDto {
   retry: RetryDto;
   compaction: CompactionDto;
   permissions: PermissionsDto;
+  web: WebDto;
+  mcp_servers: McpServerDto[];
   providers: ProviderDto[];
 }

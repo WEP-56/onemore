@@ -822,6 +822,275 @@ mod tests {
     }
 
     #[test]
+    fn rpc_v3_progress_event_set_has_stable_tagged_wire_shapes() {
+        let output = ToolOutputView {
+            content: "remote output".into(),
+            summary: "remote summary".into(),
+            metadata: ToolMetadataView::default(),
+        };
+        let approval = ApprovalRequestView {
+            request_id: "approval-1".into(),
+            tool: "mcp__browser__click".into(),
+            summary: "selector=#submit".into(),
+            reason: "未声明目标的副作用".into(),
+            scopes: vec![ApprovalScopeView::Once, ApprovalScopeView::Session],
+            command: None,
+            cwd: None,
+            targets: vec!["#submit".into()],
+        };
+        let plan = PlanView {
+            revision: 1,
+            items: vec![PlanItemView {
+                id: "step-1".into(),
+                text: "finish RPC projection".into(),
+                status: PlanStatus::InProgress,
+            }],
+            explanation: Some("wire regression".into()),
+        };
+        let usage = UsageView {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: Some(3),
+            cache_write_tokens: None,
+        };
+        let selection = ModelSelectionView {
+            provider: "provider".into(),
+            model: "model".into(),
+            effort: "medium".into(),
+            label: "provider / model".into(),
+        };
+        let events = vec![
+            ProgressEvent::UserMessage { text: "hi".into() },
+            ProgressEvent::RunStarted {
+                command_id: "command-1".into(),
+            },
+            ProgressEvent::RetryScheduled {
+                attempt: 1,
+                max_retries: 2,
+                delay_ms: 50,
+                error: "temporary".into(),
+            },
+            ProgressEvent::RetryStarted {
+                attempt: 1,
+                max_retries: 2,
+            },
+            ProgressEvent::CompactionStarted {
+                compaction_id: "compact-1".into(),
+                trigger: CompactionTriggerView::Automatic,
+                estimated_tokens: 100,
+                available_tokens: Some(200),
+            },
+            ProgressEvent::CompactionFinished {
+                compaction_id: "compact-1".into(),
+                trigger: CompactionTriggerView::Automatic,
+                tokens_before: 100,
+                summary_chars: 20,
+                retained_messages: 2,
+            },
+            ProgressEvent::CompactionFailed {
+                compaction_id: "compact-2".into(),
+                trigger: CompactionTriggerView::Manual,
+                error: "cancelled".into(),
+                cancelled: true,
+                history_changed: false,
+            },
+            ProgressEvent::AssistantDelta {
+                message_id: "message-1".into(),
+                content_index: 0,
+                kind: "text".into(),
+                delta: "answer".into(),
+            },
+            ProgressEvent::AssistantFinished {
+                message_id: "message-1".into(),
+                text: "answer".into(),
+            },
+            ProgressEvent::ToolCallPending {
+                name: "mcp__browser__click".into(),
+            },
+            ProgressEvent::ToolStarted {
+                tool_call_id: "tool-1".into(),
+                name: "mcp__browser__click".into(),
+                summary: "selector=#submit".into(),
+            },
+            ProgressEvent::ToolUpdated {
+                tool_call_id: "tool-1".into(),
+                name: "mcp__browser__click".into(),
+                output: output.clone(),
+            },
+            ProgressEvent::ToolFinished {
+                tool_call_id: "tool-1".into(),
+                name: "mcp__browser__click".into(),
+                output,
+                error: Some(CommandErrorView {
+                    code: "execution_failed".into(),
+                    message: "remote output".into(),
+                }),
+            },
+            ProgressEvent::ApprovalRequested { request: approval },
+            ProgressEvent::ApprovalResolved {
+                request_id: "approval-1".into(),
+                allowed: true,
+            },
+            ProgressEvent::Notice {
+                level: NoticeLevel::Info,
+                text: "MCP server browser connected".into(),
+            },
+            ProgressEvent::Error {
+                error: CommandErrorView {
+                    code: "agent_error".into(),
+                    message: "failed".into(),
+                },
+            },
+            ProgressEvent::PlanUpdated { plan },
+            ProgressEvent::SkillsDiscovered {
+                skills: vec![SkillMetadataView {
+                    name: "review".into(),
+                    description: "review changes".into(),
+                    scope: SkillScopeView::Repo,
+                }],
+                warnings: vec!["one warning".into()],
+            },
+            ProgressEvent::Usage { usage },
+            ProgressEvent::ConversationCleared,
+            ProgressEvent::ModelSelectionChanged { selection },
+            ProgressEvent::SessionsListed {
+                current_id: "session-1".into(),
+                sessions: vec![SessionSummaryView {
+                    id: "session-1".into(),
+                    title: "title".into(),
+                    workspace: "workspace".into(),
+                    message_count: 2,
+                    updated_at: 3,
+                }],
+            },
+        ];
+        let expected = vec![
+            "user_message",
+            "run_started",
+            "retry_scheduled",
+            "retry_started",
+            "compaction_started",
+            "compaction_finished",
+            "compaction_failed",
+            "assistant_delta",
+            "assistant_finished",
+            "tool_call_pending",
+            "tool_started",
+            "tool_updated",
+            "tool_finished",
+            "approval_requested",
+            "approval_resolved",
+            "notice",
+            "error",
+            "plan_updated",
+            "skills_discovered",
+            "usage",
+            "conversation_cleared",
+            "model_selection_changed",
+            "sessions_listed",
+        ];
+
+        let values = events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect::<Vec<_>>();
+        let actual = values
+            .iter()
+            .map(|value| value["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        for (event, value) in events.into_iter().zip(values) {
+            assert_eq!(
+                serde_json::from_value::<ProgressEvent>(value).unwrap(),
+                event
+            );
+        }
+    }
+
+    #[test]
+    fn approval_projection_preserves_only_structured_display_fields() {
+        let request = ApprovalRequest {
+            request_id: "approval-1".into(),
+            tool: "run_command".into(),
+            summary: "command=cargo test".into(),
+            reason: "shell 命令执行".into(),
+            scopes: vec![ApprovalScope::Once, ApprovalScope::Session],
+            details: crate::permission::ApprovalDetails {
+                command: Some("cargo test".into()),
+                cwd: Some("workspace".into()),
+                targets: vec!["target".into()],
+            },
+        };
+
+        let view = ApprovalRequestView::from(&request);
+        assert_eq!(view.command.as_deref(), Some("cargo test"));
+        assert_eq!(view.cwd.as_deref(), Some("workspace"));
+        assert_eq!(view.targets, vec!["target"]);
+        assert_eq!(
+            serde_json::to_value(view).unwrap(),
+            json!({
+                "request_id": "approval-1",
+                "tool": "run_command",
+                "summary": "command=cargo test",
+                "reason": "shell 命令执行",
+                "scopes": ["once", "session"],
+                "command": "cargo test",
+                "cwd": "workspace",
+                "targets": ["target"]
+            })
+        );
+    }
+
+    #[test]
+    fn failed_tool_transcript_uses_output_as_its_error_body() {
+        let entries = vec![
+            entry(
+                "assistant",
+                SessionEntryPayload::message(
+                    ChatMessage {
+                        role: Role::Assistant,
+                        blocks: vec![Block::ToolUse {
+                            id: "call-1".into(),
+                            name: "mcp__browser__click".into(),
+                            input: json!({"selector": "#submit"}),
+                        }],
+                    },
+                    None,
+                ),
+            ),
+            entry(
+                "result",
+                SessionEntryPayload::message(
+                    ChatMessage {
+                        role: Role::User,
+                        blocks: vec![Block::ToolResult {
+                            tool_use_id: "call-1".into(),
+                            content: "remote click failed".into(),
+                            is_error: true,
+                        }],
+                    },
+                    None,
+                ),
+            ),
+        ];
+
+        let projected = project_transcript(&entries);
+        assert!(matches!(
+            projected.as_slice(),
+            [
+                TranscriptItem::AssistantMessage { .. },
+                TranscriptItem::Tool {
+                    name,
+                    status: ToolStatus::Failed,
+                    output: Some(output),
+                    ..
+                }
+            ] if name == "mcp__browser__click" && output == "remote click failed"
+        ));
+        assert!(!has_key(&serde_json::to_value(projected).unwrap(), "error"));
+    }
+
+    #[test]
     fn tool_output_view_exposes_only_allowlisted_display_metadata() {
         let output = crate::tools::ToolOutput {
             model_text: "full output".into(),

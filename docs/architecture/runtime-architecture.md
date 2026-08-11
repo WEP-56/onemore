@@ -23,12 +23,16 @@ src/sdk.rs + src/sdk/
   公开 SessionController、SessionEvents、snapshot/event view 和错误码
 src/rpc.rs + src/rpc/
   严格 JSONL v3 framing、wire DTO 和 SessionController adapter
+src/mcp.rs + src/mcp/
+  stdio MCP 客户端:dual-era 探测、行框架 transport、工具导入卫生与 McpHost
+src/process.rs
+  Job Object 进程树基建;run_command 与 MCP server 子进程共用
 src/runtime.rs
   公开 Agent，并承载唯一 stateful 线程宿主
 src/runtime/
   agent_loop.rs       AgentLoopHost adapter：facts、预算、planning、队列、原子提交
-  builder.rs          CLI 默认装配和宿主组件注入
-  commands.rs         命令分发、模型切换、session 管理与通用事实提交
+  builder.rs          CLI 默认装配、MCP server 装配和宿主组件注入
+  commands.rs         命令分发、模型切换、/mcp 状态、session 管理与通用事实提交
   compaction.rs       手动/自动共用的纯文本摘要调用与原子 Compaction 提交
   inbox.rs            command ID、一次性 admission ack 与 direct harness 适配
   session_runtime.rs  有界 command/event worker、phase、终态和 settled
@@ -66,6 +70,8 @@ transcript。工具 callback 必须闭合整批 ToolUse/ToolResult；默认 adap
 - `CompactionSettings`：配置或关闭请求前自动压缩，手动 `/compact` 不受开关影响。
 - `ModelRegistry`：CLI 配置、固定单模型或宿主动态模型目录使用同一解析接口。
 - `ToolRegistry`：可以使用空 registry 或完全由宿主提供工具。
+- `[[mcp_servers]]` 列表（`mcp_servers()`，默认取自 `Config`）：仅在使用默认工具装配时
+  生效；host-owned registry 由宿主自行组合工具，MCP 装配被跳过并提示。
 - `ContextProvider` 列表：可完整替换默认 instructions/project instructions/skills/workspace，
   也可追加片段。
 - `HookRegistry`、`PermissionManager` 与 `RetryPolicy`。
@@ -87,7 +93,9 @@ instructions、skills、environment，把每个 workspace 不同的环境信息�
 `prompt_cache_key`。
 
 宿主若替换 context 或 tools，应在一个 capability epoch 内保持其稳定；默认 harness 通过
-`/reload` 显式重建配置、context、skills、tools 与 Web binding，而不是在每轮请求前重扫。
+`/reload` 显式重建配置、context、skills、tools、Web binding 与 MCP servers，而不是在
+每轮请求前重扫。MCP server 进程与其导入的工具同属一个 epoch：会话中 server 死亡只产生
+稳定工具错误，不触发重连或列表刷新。
 
 ## Stateful Harness
 

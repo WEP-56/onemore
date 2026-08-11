@@ -6,11 +6,25 @@ pub const EVENT_NAME: &str = "onemore://rpc-event";
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RpcEvent {
     Hello {
+        connection_id: String,
         server: serde_json::Value,
         snapshot: serde_json::Value,
     },
-    Event { event: serde_json::Value },
-    Stderr { line: String },
-    ProcessExit { code: Option<i32> },
-    TransportError { code: String, message: String },
+    Event {
+        connection_id: String,
+        event: serde_json::Value,
+    },
+    Stderr {
+        connection_id: String,
+        line: String,
+    },
+    ProcessExit {
+        connection_id: String,
+        code: Option<i32>,
+    },
+    TransportError {
+        connection_id: String,
+        code: String,
+        message: String,
+    },
 }

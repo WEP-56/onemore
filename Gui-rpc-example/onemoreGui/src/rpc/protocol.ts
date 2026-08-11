@@ -200,4 +200,4 @@ export type ProgressEvent =
   | { type: "usage"; usage: UsageView }
   | { type: "conversation_cleared" }
   | { type: "model_selection_changed"; selection: ModelSelectionView }
-  | { type: "sessions_listed"; current_id: string; sessions: unknown[] };
+  | { type: "sessions_listed"; current_id: string; sessions: SessionSummaryView[] };

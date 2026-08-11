@@ -15,7 +15,12 @@ fn with_lf(frame: &str) -> Vec<u8> {
 }
 
 /// 单 writer task：独占 stdin，一行一个完整帧。
-pub fn spawn_writer(app: AppHandle, mut stdin: ChildStdin, rx: Receiver<String>) -> JoinHandle<()> {
+pub fn spawn_writer(
+    app: AppHandle,
+    connection_id: String,
+    mut stdin: ChildStdin,
+    rx: Receiver<String>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut write_error = None;
         while let Ok(frame) = rx.recv() {
@@ -32,6 +37,7 @@ pub fn spawn_writer(app: AppHandle, mut stdin: ChildStdin, rx: Receiver<String>)
             let _ = app.emit(
                 EVENT_NAME,
                 RpcEvent::TransportError {
+                    connection_id,
                     code: "write_error".into(),
                     message: e.to_string(),
                 },

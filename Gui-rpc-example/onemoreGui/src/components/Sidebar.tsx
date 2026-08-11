@@ -21,6 +21,10 @@ import {
   Home,
   Settings,
   RefreshCw,
+  CircleAlert,
+  CircleCheck,
+  CircleX,
+  LoaderCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -42,6 +46,18 @@ import {
 } from "@/components/ui/dropdown-menu";
 import BrandMark from "@/components/BrandMark";
 
+type TaskStatus = "running" | "waiting_approval" | "failed" | "completed";
+
+function taskStatus(view: import("@/app/types").SessionViewState): TaskStatus | null {
+  if (view.snapshot?.phase === "waiting_approval") return "waiting_approval";
+  if (["running", "retrying", "compacting"].includes(view.snapshot?.phase ?? "")) return "running";
+  if (view.lastTerminal?.status === "failed" || (view.conn === "disconnected" && view.lastError)) {
+    return "failed";
+  }
+  if (view.snapshot?.phase === "idle" && view.lastTerminal?.status === "succeeded") return "completed";
+  return null;
+}
+
 export default function Sidebar() {
   const workspaces = useStore((s) => s.workspaces);
   const workspaceGroups = useStore((s) => s.workspaceGroups);
@@ -58,6 +74,7 @@ export default function Sidebar() {
   const snapshot = useStore((s) => s.snapshot);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const conn = useStore((s) => s.conn);
+  const rpcTasks = useStore((s) => s.rpcTasks);
 
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [renameTarget, setRenameTarget] = useState<{ type: "workspace" | "session"; id: string; title: string } | null>(null);
@@ -114,6 +131,20 @@ export default function Sidebar() {
   const handleSelectSession = (id: string) => {
     void loadSession(id);
   };
+
+  const taskStatuses = useMemo(() => {
+    const result = new Map<string, { status: TaskStatus; updatedAt: number }>();
+    for (const task of Object.values(rpcTasks)) {
+      const sessionId = task.view.snapshot?.session_id ?? task.targetSessionId;
+      const status = taskStatus(task.view);
+      if (!sessionId || !status) continue;
+      const current = result.get(sessionId);
+      if (!current || current.updatedAt < task.updatedAt) {
+        result.set(sessionId, { status, updatedAt: task.updatedAt });
+      }
+    }
+    return new Map([...result].map(([id, value]) => [id, value.status]));
+  }, [rpcTasks]);
 
   const isExpanded = (path: string) => expanded.has(path) || searchActive || path === activeWorkspace;
 
@@ -203,6 +234,7 @@ export default function Sidebar() {
                       onSelectSession={handleSelectSession}
                       onRenameSession={(id, title) => setRenameTarget({ type: "session", id, title })}
                       searchActive={searchActive}
+                      taskStatuses={taskStatuses}
                     />
                   ))}
                 </div>
@@ -234,6 +266,7 @@ export default function Sidebar() {
                       onSelectSession={handleSelectSession}
                       onRenameSession={(id, title) => setRenameTarget({ type: "session", id, title })}
                       searchActive={searchActive}
+                      taskStatuses={taskStatuses}
                     />
                   ))}
                 </div>
@@ -271,7 +304,7 @@ export default function Sidebar() {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <span className="sidebar-version">v0.1.0</span>
+        <span className="sidebar-version">v0.2.0</span>
       </div>
 
       <RenameDialog target={renameTarget} onClose={() => setRenameTarget(null)} />
@@ -332,6 +365,7 @@ function WorkspaceRow({
   onSelectSession,
   onRenameSession,
   searchActive,
+  taskStatuses,
 }: {
   label: string;
   active: boolean;
@@ -349,6 +383,7 @@ function WorkspaceRow({
   onSelectSession: (id: string) => void;
   onRenameSession: (id: string, title: string) => void;
   searchActive: boolean;
+  taskStatuses: Map<string, TaskStatus>;
 }) {
   const git = useStore((s) => s.gitStatus);
   const showBranch = active && git?.is_repo && git.branch;
@@ -446,6 +481,7 @@ function WorkspaceRow({
               active={activeSessionId === s.id}
               onSelect={() => onSelectSession(s.id)}
               onRename={() => onRenameSession(s.id, s.title)}
+              taskStatus={taskStatuses.get(s.id) ?? null}
             />
           ))}
         </div>
@@ -460,11 +496,13 @@ function SessionRow({
   active,
   onSelect,
   onRename,
+  taskStatus,
 }: {
   session: import("@/app/types").SessionEntry;
   active: boolean;
   onSelect: () => void;
   onRename: () => void;
+  taskStatus: TaskStatus | null;
 }) {
   const isPinned = useStore((s) => s.isSessionPinned(session.id));
   const togglePin = useStore((s) => s.togglePinSession);
@@ -484,6 +522,7 @@ function SessionRow({
         <MessageSquare size={13} className="thread-icon" />
       )}
       <span className="thread-name">{session.title || "（无标题）"}</span>
+      {taskStatus && <TaskStatusIcon status={taskStatus} />}
       <span className="thread-meta">{relativeTime(session.updated_at)}</span>
       <span className="thread-actions" onClick={(e) => e.stopPropagation()}>
         <button
@@ -531,6 +570,23 @@ function SessionRow({
         )}
       </span>
     </button>
+  );
+}
+
+function TaskStatusIcon({ status }: { status: TaskStatus }) {
+  const labels: Record<TaskStatus, string> = {
+    running: "正在后台运行",
+    waiting_approval: "等待审批",
+    failed: "任务失败",
+    completed: "任务已完成",
+  };
+  return (
+    <span className={cn("thread-task-status", status)} title={labels[status]} aria-label={labels[status]}>
+      {status === "running" && <LoaderCircle size={12} className="animate-spin" />}
+      {status === "waiting_approval" && <CircleAlert size={12} />}
+      {status === "failed" && <CircleX size={12} />}
+      {status === "completed" && <CircleCheck size={12} />}
+    </span>
   );
 }
 

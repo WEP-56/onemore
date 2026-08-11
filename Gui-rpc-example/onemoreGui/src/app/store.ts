@@ -6,7 +6,6 @@ import { playErrorSound, playSuccessSound } from "@/lib/sounds";
 import {
   rpcDiagnosticsTail,
   rpcRequest,
-  rpcSnapshot,
   rpcStart,
   rpcStop,
   subscribeBackend,
@@ -17,15 +16,20 @@ import {
   applyHello,
   applyProcessExit,
   applyRequestError,
-  applySnapshot,
   applyStderr,
   applyTransportError,
   freshViewState,
 } from "../rpc/reducer";
-import type { ApprovalDecision, NoticeLevel, SkillMetadataView } from "../rpc/protocol";
+import type {
+  ApprovalDecision,
+  NoticeLevel,
+  SessionSummaryView,
+  SkillMetadataView,
+} from "../rpc/protocol";
 import type {
   ConfigDto,
   GitStatus,
+  ManagedRpcTask,
   SessionEntry,
   SessionViewState,
   WorkspaceEntry,
@@ -35,6 +39,8 @@ import type {
 import { AUTO_CONTINUE_PROMPT, normalizeWorkspace, workspaceKey } from "./util";
 
 interface AppStore extends SessionViewState {
+  activeConnectionId: string | null;
+  rpcTasks: Record<string, ManagedRpcTask>;
   // workspace 管理
   workspaces: WorkspaceEntry[];
   workspaceGroups: WorkspaceGroup[];
@@ -149,8 +155,54 @@ function writePinnedSessions(pinned: Record<string, number>) {
   }
 }
 
+function mergeRpcSessions(
+  current: SessionEntry[],
+  incoming: SessionSummaryView[],
+): SessionEntry[] {
+  const merged = new Map(current.map((session) => [session.id, session]));
+  for (const session of incoming) {
+    const previous = merged.get(session.id);
+    merged.set(session.id, {
+      id: session.id,
+      workspace: session.workspace,
+      title: session.title,
+      created_at: previous?.created_at ?? session.updated_at,
+      updated_at: session.updated_at,
+      input_tokens: previous?.input_tokens ?? 0,
+      output_tokens: previous?.output_tokens ?? 0,
+      message_count: session.message_count,
+    });
+  }
+  return [...merged.values()];
+}
+
+function mergeManagedSessions(
+  current: SessionEntry[],
+  tasks: ManagedRpcTask[],
+): SessionEntry[] {
+  const merged = new Map(current.map((session) => [session.id, session]));
+  for (const task of tasks) {
+    const snapshot = task.view.snapshot;
+    if (!snapshot) continue;
+    const previous = merged.get(snapshot.session_id);
+    const rpcSummary = task.view.rpcSessions.find((session) => session.id === snapshot.session_id);
+    const updatedAt = Math.floor(task.updatedAt / 1000);
+    merged.set(snapshot.session_id, {
+      id: snapshot.session_id,
+      workspace: snapshot.workspace,
+      title: previous?.title ?? rpcSummary?.title ?? "新会话",
+      created_at: previous?.created_at ?? updatedAt,
+      updated_at: Math.max(previous?.updated_at ?? 0, updatedAt),
+      input_tokens: snapshot.usage.input_tokens,
+      output_tokens: snapshot.usage.output_tokens,
+      message_count: snapshot.transcript.length,
+    });
+  }
+  return [...merged.values()];
+}
+
 export const useStore = create<AppStore>((set, get) => {
-  let restoreSessionId: string | null = null;
+  const restoreSessions = new Map<string, string>();
   let autoContinueTimer: ReturnType<typeof setTimeout> | null = null;
   let autoPlan = {
     enabled: false,
@@ -168,7 +220,15 @@ export const useStore = create<AppStore>((set, get) => {
   function pushNotice(level: NoticeLevel, text: string) {
     const at = Date.now();
     const notice = { key: `client:${at}:${Math.random()}`, level, text, at };
-    set({ liveNotices: [...get().liveNotices, notice].slice(-50) });
+    const connectionId = get().activeConnectionId;
+    if (connectionId && get().rpcTasks[connectionId]) {
+      updateTask(connectionId, (view) => ({
+        ...view,
+        liveNotices: [...view.liveNotices, notice].slice(-50),
+      }));
+    } else {
+      set({ liveNotices: [...get().liveNotices, notice].slice(-50) });
+    }
   }
 
   async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
@@ -180,26 +240,115 @@ export const useStore = create<AppStore>((set, get) => {
     }
   }
 
+  function updateTask(
+    connectionId: string,
+    update: (view: SessionViewState) => SessionViewState,
+    fields: Partial<Omit<ManagedRpcTask, "connectionId" | "view">> = {},
+  ): SessionViewState | null {
+    const state = get();
+    const current = state.rpcTasks[connectionId];
+    if (!current) return null;
+    const view = update(current.view);
+    const task = { ...current, ...fields, view, updatedAt: Date.now() };
+    const patch: Partial<AppStore> = {
+      rpcTasks: { ...state.rpcTasks, [connectionId]: task },
+    };
+    if (state.activeConnectionId === connectionId) Object.assign(patch, view, { skills: task.skills });
+    set(patch);
+    return view;
+  }
+
+  function activateTask(task: ManagedRpcTask) {
+    resetAutoPlan();
+    writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(task.workspace));
+    if (task.view.snapshot?.session_id) {
+      writeStoredValue(LAST_SESSION_KEY, task.view.snapshot.session_id);
+    }
+    set({
+      activeConnectionId: task.connectionId,
+      activeWorkspace: task.workspace,
+      skills: task.skills,
+      ...task.view,
+    });
+    void get().loadGitStatus(task.workspace);
+  }
+
+  async function startTask(workspace: string, targetSessionId: string | null): Promise<void> {
+    resetAutoPlan();
+    const normalized = normalizeWorkspace(workspace);
+    const connectionId = crypto.randomUUID();
+    const view = { ...freshViewState(), conn: "spawning" as const };
+    const task: ManagedRpcTask = {
+      connectionId,
+      workspace: normalized,
+      targetSessionId,
+      view,
+      skills: [],
+      updatedAt: Date.now(),
+    };
+    if (targetSessionId) restoreSessions.set(connectionId, targetSessionId);
+    writeStoredValue(LAST_WORKSPACE_KEY, normalized);
+    writeStoredValue(LAST_SESSION_KEY, targetSessionId);
+    set({
+      activeConnectionId: connectionId,
+      activeWorkspace: normalized,
+      rpcTasks: { ...get().rpcTasks, [connectionId]: task },
+      skills: [],
+      ...view,
+    });
+    try {
+      await rpcStart(connectionId, {
+        executable: "onemore",
+        config: null,
+        workspace: normalized,
+      });
+      updateTask(connectionId, (current) => ({ ...current, conn: "handshaking" }));
+    } catch (e) {
+      restoreSessions.delete(connectionId);
+      const err = toErrorMessage(e);
+      updateTask(connectionId, (current) => ({
+        ...current,
+        conn: "disconnected",
+        lastError: err,
+        transportIssues: [{ code: err.code, message: err.message, at: Date.now() }],
+      }));
+    }
+  }
+
   async function sendCommand(
     command: string,
     params: Record<string, unknown> | null,
+    connectionId = get().activeConnectionId,
   ): Promise<void> {
+    if (!connectionId) return;
     try {
-      const res = await withBusy(() =>
-        rpcRequest<{ command?: string; command_id?: string }>(command, params ?? undefined),
+      const request = () => rpcRequest<{ command?: string; command_id?: string }>(
+        connectionId,
+        command,
+        params ?? undefined,
       );
+      const res = get().activeConnectionId === connectionId ? await withBusy(request) : await request();
+      const task = get().rpcTasks[connectionId];
+      if (!task) return;
       const metrics = {
-        ...get().metrics,
-        acceptedCommands: get().metrics.acceptedCommands + 1,
+        ...task.view.metrics,
+        acceptedCommands: task.view.metrics.acceptedCommands + 1,
       };
-      set({ metrics, lastError: null });
-      if (res?.command_id) {
-        set({ run: { commandId: res.command_id, startedAt: Date.now() } });
-      }
+      updateTask(connectionId, (current) => ({
+        ...current,
+        metrics,
+        lastError: null,
+        run: res?.command_id
+          ? { commandId: res.command_id, startedAt: Date.now() }
+          : current.run,
+      }));
     } catch (e) {
       const err = toErrorMessage(e);
-      set(applyRequestError(get(), err.code, err.message));
-      if (command === "prompt" || command === "follow_up") resetAutoPlan();
+      updateTask(connectionId, (current) => applyRequestError(current, err.code, err.message));
+      if (
+        get().activeConnectionId === connectionId
+        && (command === "prompt" || command === "follow_up")
+      ) resetAutoPlan();
     }
   }
 
@@ -243,6 +392,8 @@ export const useStore = create<AppStore>((set, get) => {
 
   return {
     ...freshViewState(),
+    activeConnectionId: null,
+    rpcTasks: {},
     workspaces: [],
     workspaceGroups: [],
     activeWorkspace: null,
@@ -263,61 +414,77 @@ export const useStore = create<AppStore>((set, get) => {
       if (get().initialized) return;
       set({ initialized: true });
       await subscribeBackend((ev) => {
-        const s = get();
+        const isActive = get().activeConnectionId === ev.connection_id;
         switch (ev.kind) {
-          case "hello":
-            set(applyHello(s, ev.server, ev.snapshot));
-            writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.snapshot.workspace));
-            writeStoredValue(LAST_SESSION_KEY, ev.snapshot.session_id);
+          case "hello": {
+            updateTask(
+              ev.connection_id,
+              (view) => applyHello(view, ev.server, ev.snapshot),
+              { workspace: normalizeWorkspace(ev.snapshot.workspace) },
+            );
+            if (isActive) {
+              writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.snapshot.workspace));
+              writeStoredValue(LAST_SESSION_KEY, ev.snapshot.session_id);
+              void get().loadGitStatus(ev.snapshot.workspace);
+            }
             void get().loadSessions();
-            void get().loadGitStatus(ev.snapshot.workspace);
-            if (restoreSessionId && restoreSessionId !== ev.snapshot.session_id) {
-              const requested = restoreSessionId;
-              restoreSessionId = null;
-              void sendCommand("load_session", { session_id: requested });
-            } else {
-              restoreSessionId = null;
+            const requested = restoreSessions.get(ev.connection_id);
+            restoreSessions.delete(ev.connection_id);
+            if (requested && requested !== ev.snapshot.session_id) {
+              void sendCommand("load_session", { session_id: requested }, ev.connection_id);
             }
             break;
-          case "event":
-            set(applyEvent(s, ev.event));
+          }
+          case "event": {
+            const projected = updateTask(ev.connection_id, (view) => applyEvent(view, ev.event));
             if (ev.event.type === "progress" && ev.event.progress.type === "skills_discovered") {
-              set({ skills: ev.event.progress.skills });
-              for (const warning of ev.event.progress.warnings) pushNotice("warning", warning);
+              updateTask(ev.connection_id, (view) => view, { skills: ev.event.progress.skills });
+              if (isActive) {
+                for (const warning of ev.event.progress.warnings) pushNotice("warning", warning);
+              }
+            }
+            if (ev.event.type === "progress" && ev.event.progress.type === "sessions_listed") {
+              set({ sessions: mergeRpcSessions(get().sessions, ev.event.progress.sessions) });
+              if (isActive) writeStoredValue(LAST_SESSION_KEY, ev.event.progress.current_id);
             }
             if (ev.event.type === "settled") {
               void get().loadSessions();
-              const state = get();
-              const hasActivePlan = state.snapshot?.plan.items.some((item) => item.status !== "completed") ?? false;
-              if (!hasActivePlan && state.lastTerminal?.status === "succeeded") playSuccessSound();
-              continueActivePlan();
+              const hasActivePlan = projected?.snapshot?.plan.items.some((item) => item.status !== "completed") ?? false;
+              if (!hasActivePlan && projected?.lastTerminal?.status === "succeeded") playSuccessSound();
+              if (isActive) continueActivePlan();
             }
             if (ev.event.type === "session_snapshot") {
-              writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.event.snapshot.workspace));
-              writeStoredValue(LAST_SESSION_KEY, ev.event.snapshot.session_id);
+              updateTask(ev.connection_id, (view) => view, {
+                workspace: normalizeWorkspace(ev.event.snapshot.workspace),
+                targetSessionId: ev.event.snapshot.session_id,
+              });
+              if (isActive) {
+                writeStoredValue(LAST_WORKSPACE_KEY, normalizeWorkspace(ev.event.snapshot.workspace));
+                writeStoredValue(LAST_SESSION_KEY, ev.event.snapshot.session_id);
+              }
+              void get().loadSessions();
             }
             if (ev.event.type === "command_finished") {
               if (ev.event.status === "failed") playErrorSound();
             }
             break;
+          }
           case "stderr":
-            set(applyStderr(s, ev.line));
+            updateTask(ev.connection_id, (view) => applyStderr(view, ev.line));
             break;
           case "transport_error":
-            set(applyTransportError(s, ev.code, ev.message));
+            updateTask(
+              ev.connection_id,
+              (view) => applyTransportError(view, ev.code, ev.message),
+            );
             break;
           case "process_exit":
-            resetAutoPlan();
-            set(applyProcessExit(s, ev.code));
+            restoreSessions.delete(ev.connection_id);
+            if (isActive) resetAutoPlan();
+            updateTask(ev.connection_id, (view) => applyProcessExit(view, ev.code));
             break;
         }
       });
-      try {
-        const snap = await rpcSnapshot();
-        if (snap) set(applySnapshot(get(), snap));
-      } catch {
-        // 未连接时忽略
-      }
       await get().loadWorkspaces();
       await get().loadSessions();
 
@@ -327,8 +494,8 @@ export const useStore = create<AppStore>((set, get) => {
       const targetKey = workspaceKey(session?.workspace ?? lastWorkspace ?? "");
       const workspace = get().workspaces.find((item) => workspaceKey(item.path) === targetKey);
       if (workspace) {
-        restoreSessionId = session?.id ?? null;
-        await get().connect(workspace.path);
+        if (session) await startTask(workspace.path, session.id);
+        else await get().connect(workspace.path);
       }
     },
 
@@ -419,7 +586,7 @@ export const useStore = create<AppStore>((set, get) => {
     loadSessions: async () => {
       try {
         const sessions = await invoke<SessionEntry[]>("list_all_sessions");
-        set({ sessions });
+        set({ sessions: mergeManagedSessions(sessions, Object.values(get().rpcTasks)) });
       } catch {
         // ignore
       }
@@ -435,12 +602,14 @@ export const useStore = create<AppStore>((set, get) => {
       writeStoredValue(LAST_WORKSPACE_KEY, target);
       writeStoredValue(LAST_SESSION_KEY, id);
 
-      if (get().conn !== "connected" || workspaceKey(get().activeWorkspace ?? "") !== targetKey) {
-        restoreSessionId = id;
-        await get().connect(target);
+      const existing = Object.values(get().rpcTasks)
+        .filter((task) => task.view.conn !== "disconnected")
+        .find((task) => task.view.snapshot?.session_id === id || task.targetSessionId === id);
+      if (existing) {
+        activateTask(existing);
         return;
       }
-      await sendCommand("load_session", { session_id: id });
+      await startTask(target, id);
     },
 
     newConversation: async () => {
@@ -449,7 +618,7 @@ export const useStore = create<AppStore>((set, get) => {
       if (!active) return;
       await get().loadSessions();
       writeStoredValue(LAST_SESSION_KEY, null);
-      await get().connect(active);
+      await startTask(active, null);
     },
 
     clearConversation: () => sendCommand("clear_conversation", null),
@@ -531,34 +700,30 @@ export const useStore = create<AppStore>((set, get) => {
     },
 
     connect: async (workspace) => {
-      resetAutoPlan();
       const normalized = normalizeWorkspace(workspace);
-      writeStoredValue(LAST_WORKSPACE_KEY, normalized);
-      set({ activeWorkspace: workspace, skills: [], ...freshViewState(), conn: "spawning" });
-      try {
-        await rpcStart({
-          executable: "onemore",
-          config: null,
-          workspace: normalized,
-        });
-        set({ conn: "handshaking" });
-      } catch (e) {
-        const err = toErrorMessage(e);
-        set({
-          conn: "disconnected",
-          lastError: err,
-          transportIssues: [{ code: err.code, message: err.message, at: Date.now() }],
-        });
+      const existing = Object.values(get().rpcTasks)
+        .filter(
+          (task) => task.view.conn !== "disconnected"
+            && workspaceKey(task.workspace) === workspaceKey(normalized),
+        )
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+      if (existing) {
+        activateTask(existing);
+        return;
       }
+      await startTask(normalized, null);
     },
 
     disconnect: async () => {
+      const connectionId = get().activeConnectionId;
+      if (!connectionId) return;
       resetAutoPlan();
-      set({ conn: "shutting_down" });
+      updateTask(connectionId, (view) => ({ ...view, conn: "shutting_down" }));
       try {
-        await rpcStop();
+        await rpcStop(connectionId);
       } catch (e) {
-        set({ lastError: toErrorMessage(e) });
+        const err = toErrorMessage(e);
+        updateTask(connectionId, (view) => applyRequestError(view, err.code, err.message));
       }
     },
 
@@ -596,26 +761,33 @@ export const useStore = create<AppStore>((set, get) => {
     respondApproval: async (decision) => {
       const req = get().liveApproval ?? get().snapshot?.pending_approval ?? null;
       if (!req) return;
-      set({ liveApproval: null });
+      const connectionId = get().activeConnectionId;
+      if (connectionId) {
+        updateTask(connectionId, (view) => ({ ...view, liveApproval: null }));
+      }
       await sendCommand("approval_response", { request_id: req.request_id, decision });
     },
 
     snapshotNow: async () => {
+      const connectionId = get().activeConnectionId;
+      if (!connectionId) return;
       try {
-        await withBusy(() => rpcRequest("get_snapshot"));
+        await withBusy(() => rpcRequest(connectionId, "get_snapshot"));
       } catch (e) {
         const err = toErrorMessage(e);
-        set(applyRequestError(get(), err.code, err.message));
+        updateTask(connectionId, (view) => applyRequestError(view, err.code, err.message));
       }
     },
 
     refreshDiagnostics: async () => {
+      const connectionId = get().activeConnectionId;
+      if (!connectionId) return;
       try {
-        const lines = await rpcDiagnosticsTail(400);
-        set({ stderrLines: lines });
+        const lines = await rpcDiagnosticsTail(connectionId, 400);
+        updateTask(connectionId, (view) => ({ ...view, stderrLines: lines }));
       } catch (e) {
         const err = toErrorMessage(e);
-        set(applyRequestError(get(), err.code, err.message));
+        updateTask(connectionId, (view) => applyRequestError(view, err.code, err.message));
       }
     },
   };

@@ -46,7 +46,11 @@ pub struct RpcHandle {
     pub last_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
-pub fn spawn_rpc(app: AppHandle, options: StartOptions) -> Result<RpcHandle, GuiError> {
+pub fn spawn_rpc(
+    app: AppHandle,
+    connection_id: String,
+    options: StartOptions,
+) -> Result<RpcHandle, GuiError> {
     let mut child = spawn_with_fallback(&options)?;
 
     let stdin = child
@@ -66,7 +70,7 @@ pub fn spawn_rpc(app: AppHandle, options: StartOptions) -> Result<RpcHandle, Gui
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
     let (tx_frame, rx_frame) = mpsc::channel::<String>();
-    writer::spawn_writer(app.clone(), stdin, rx_frame);
+    writer::spawn_writer(app.clone(), connection_id.clone(), stdin, rx_frame);
 
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let last_snapshot: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
@@ -75,14 +79,26 @@ pub fn spawn_rpc(app: AppHandle, options: StartOptions) -> Result<RpcHandle, Gui
         let child = child.clone();
         let pending = pending.clone();
         let last_snapshot = last_snapshot.clone();
-        move || reader_loop(app, stdout, child, pending, last_snapshot, done_tx)
+        let connection_id = connection_id.clone();
+        move || {
+            reader_loop(
+                app,
+                connection_id,
+                stdout,
+                child,
+                pending,
+                last_snapshot,
+                done_tx,
+            )
+        }
     });
 
     let stderr_log = Arc::new(Mutex::new(VecDeque::new()));
     thread::spawn({
         let app = app.clone();
         let stderr_log = stderr_log.clone();
-        move || stderr_loop(app, stderr, stderr_log)
+        let connection_id = connection_id.clone();
+        move || stderr_loop(app, connection_id, stderr, stderr_log)
     });
 
     tx_frame
@@ -212,6 +228,7 @@ pub fn shutdown(handle: RpcHandle) -> Result<(), GuiError> {
 
 fn reader_loop(
     app: AppHandle,
+    connection_id: String,
     stdout: std::process::ChildStdout,
     child: Arc<Mutex<Option<Child>>>,
     pending: PendingMap,
@@ -223,7 +240,8 @@ fn reader_loop(
     loop {
         match reader.next_frame() {
             Ok(Some(value)) => {
-                if let Err(e) = handle_frame(&app, value, &pending, &last_snapshot) {
+                if let Err(e) = handle_frame(&app, &connection_id, value, &pending, &last_snapshot)
+                {
                     fatal = Some(e);
                     break;
                 }
@@ -236,16 +254,30 @@ fn reader_loop(
         }
     }
     if let Some((code, message)) = fatal {
-        let _ = app.emit(EVENT_NAME, RpcEvent::TransportError { code, message });
+        let _ = app.emit(
+            EVENT_NAME,
+            RpcEvent::TransportError {
+                connection_id: connection_id.clone(),
+                code,
+                message,
+            },
+        );
     }
     let code = wait_child(&child);
-    let _ = app.emit(EVENT_NAME, RpcEvent::ProcessExit { code });
+    let _ = app.emit(
+        EVENT_NAME,
+        RpcEvent::ProcessExit {
+            connection_id,
+            code,
+        },
+    );
     fail_all_pending(&pending);
     let _ = done_tx.send(());
 }
 
 fn handle_frame(
     app: &AppHandle,
+    connection_id: &str,
     value: serde_json::Value,
     pending: &PendingMap,
     last_snapshot: &Arc<Mutex<Option<serde_json::Value>>>,
@@ -265,7 +297,14 @@ fn handle_frame(
                 ));
             }
             *last_snapshot.lock().unwrap() = Some(snapshot.clone());
-            let _ = app.emit(EVENT_NAME, RpcEvent::Hello { server, snapshot });
+            let _ = app.emit(
+                EVENT_NAME,
+                RpcEvent::Hello {
+                    connection_id: connection_id.to_string(),
+                    server,
+                    snapshot,
+                },
+            );
         }
         InboundFrame::HelloError { error } => {
             return Err((error.code, error.message));
@@ -282,7 +321,13 @@ fn handle_frame(
                     *last_snapshot.lock().unwrap() = Some(snapshot);
                 }
             }
-            let _ = app.emit(EVENT_NAME, RpcEvent::Event { event });
+            let _ = app.emit(
+                EVENT_NAME,
+                RpcEvent::Event {
+                    connection_id: connection_id.to_string(),
+                    event,
+                },
+            );
         }
     }
     Ok(())
@@ -342,6 +387,7 @@ fn fail_all_pending(pending: &PendingMap) {
 
 fn stderr_loop(
     app: AppHandle,
+    connection_id: String,
     stderr: std::process::ChildStderr,
     log: Arc<Mutex<VecDeque<String>>>,
 ) {
@@ -355,7 +401,13 @@ fn stderr_loop(
                 g.pop_front();
             }
         }
-        let _ = app.emit(EVENT_NAME, RpcEvent::Stderr { line });
+        let _ = app.emit(
+            EVENT_NAME,
+            RpcEvent::Stderr {
+                connection_id: connection_id.clone(),
+                line,
+            },
+        );
     }
 }
 

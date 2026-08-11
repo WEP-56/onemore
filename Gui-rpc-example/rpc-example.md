@@ -101,7 +101,7 @@ request ID 关联「这一个请求的应答」，command ID 关联「这一条�
 | `compact` | — | mutation | 触发压缩 |
 | `set_model` | `provider, model, effort` | mutation | 一次性提交，无半切换状态 |
 | `clear_conversation` | — | mutation | 仅 idle |
-| `list_sessions` | — | query | 返回 `sessions` |
+| `list_sessions` | `all?` | query | 默认当前 workspace；`all=true` 跨 workspace 返回 `sessions` |
 | `load_session` | `session_id` | mutation | 仅 idle；成功后清理 session 级授权 |
 | `list_models` | — | query | 返回 `models`（不含 API key / base URL） |
 | `get_snapshot` | — | query | 权威快照，不改运行状态 |
@@ -111,9 +111,12 @@ request ID 关联「这一个请求的应答」，command ID 关联「这一条�
 **事件**（`{"type":"event","event":{...}}`）：
 
 - `session_snapshot { snapshot }` —— 权威值，前端重建画面的唯一来源
-- `progress { progress }` —— 瞬时流式：`run_started` / `assistant_delta` /
-  `assistant_finished` / `tool_started` / `tool_updated` / `tool_finished` /
-  `approval_requested` / `approval_resolved` / `notice` / `user_message` / `error` …
+- `progress { progress }` —— 瞬时流式：`user_message` / `run_started` /
+  `retry_scheduled` / `retry_started` / `compaction_started` / `compaction_finished` /
+  `compaction_failed` / `assistant_delta` / `assistant_finished` / `tool_call_pending` /
+  `tool_started` / `tool_updated` / `tool_finished` / `approval_requested` /
+  `approval_resolved` / `notice` / `error` / `plan_updated` / `skills_discovered` /
+  `usage` / `conversation_cleared` / `model_selection_changed` / `sessions_listed`
 - `command_finished { command_id, status, error }`
 - `settled { revision }`
 
@@ -128,9 +131,12 @@ request ID 关联「这一个请求的应答」，command ID 关联「这一条�
 - 用 `std::process::Command` 分别传 program 和 args，**不要拼接 shell 字符串**；
 - `current_dir` 设为用户的 workspace；
 - 启动后**立刻接管 stdin/stdout/stderr**；
-- 一个窗口/客户端**至多一个 RPC 子进程、一个 stdin writer**；
+- 每个受管桌面任务持有一个 RPC 子进程和一个独占 stdin writer；切换工作区或会话只切换
+  当前投影，不关闭仍在运行或等待审批的后台任务；
+- 多连接复用同一 Tauri 事件通道时，由 GUI 桥接层给事件外包一层 `connection_id`，用于路由到各自
+  reducer 状态。该字段不是 RPC v3 帧的一部分；
 - GUI 退出、窗口关闭、transport 出错时：先停止接收新请求 → 关 stdin（EOF）→ 等进程退出 →
-  超时才 kill。**绝不能让 onemore 在 GUI 退出后继续执行工具**。
+  超时才 kill；退出应用时对全部受管进程执行此流程。**绝不能让 onemore 在 GUI 退出后继续执行工具**。
 
 ### 4.2 Framing：LF 是命根子
 
@@ -183,20 +189,26 @@ snapshot（权威）      progress（瞬时增量）
     │                     │
     ├─ transcript         ├─ assistant_delta → 流式块（按 message_id 归并）
     ├─ phase              ├─ tool_started/updated/finished → 工具行
-    ├─ usage              ├─ approval_requested → 审批 modal
-    ├─ queues             └─ ...
-    └─ pending_approval
+    ├─ usage              ├─ approval_requested → 审批浮层
+    ├─ queues             ├─ plan/usage/model → 即时校正展示值
+    └─ pending_approval   └─ retry/compaction/tool pending → 临时活动状态
 ```
 
 三条规则：
 
 1. **progress 可以即时渲染，但 `session_snapshot` 到达时，用它整体纠正本地组装**；
    delta、工具、terminal、settled 的重复/乱序输入不得破坏 UI。
-2. **snapshot 到达时清理已提交的 live 增量**，只保留还没被提交的流式消息/工具调用。
+2. `assistant_finished.text` 是完整正文，必须覆盖本地拼接结果；idle snapshot 到达时清理
+   本轮 live 增量，非 idle snapshot 保留尚未提交的流式消息/工具调用。
 3. `settled` 只用于"回到稳定边界"的展示，不能替代具体命令的 terminal。
 
-Gui-rpc-example 的 reducer 有完整 Vitest fixture：流式累积、snapshot 纠正、
-未提交增量跨 snapshot 保留、重复 terminal 不炸。
+`ProgressEvent` 的 TypeScript switch 使用穷尽检查；协议新增公开事件但 reducer 没有显式分支时，
+`npm run build` 会失败，避免事件被静默漏掉。plan、usage、model、clear 与 sessions list 会先更新
+即时展示值，后续 snapshot 再覆盖为权威状态。
+
+工具失败同时携带稳定 `error.code/message` 和清洗限长后的 `output.content`。聊天区正文读取
+`output.content`；最终 transcript tool 没有独立 `error` 字段，使用 `status="failed"` 与 `output`。
+审批只展示 `summary/reason` 及 `command/cwd/targets`，不得显示原始工具参数 JSON。
 
 ---
 
@@ -237,6 +249,7 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 - [ ] 等待 hello 成功，校验 version == 3，拒绝降级
 - [ ] stdout 用增量 JSONL reader，stderr 独立有界保留
 - [ ] 单 writer task 独占 stdin，统一补 LF
+- [ ] 多任务客户端按 `connection_id` 隔离 handle、pending map、snapshot 和前端 reducer 状态
 - [ ] request ID 唯一，pending map 关联 response
 - [ ] mutation 只信 `command_id`，完成看 `command_finished`，稳定看 `settled`
 - [ ] 前端以 snapshot 为权威，progress 为瞬时增量，到达时纠正
@@ -258,7 +271,7 @@ snapshot 的 `queues.steering` / `queues.follow_up` 是队列的权威视图；
 | 增量 JSONL reader（半帧/超长/UTF-8） | `onemoreGui/src-tauri/src/rpc/reader.rs` |
 | 严格入站 DTO | `onemoreGui/src-tauri/src/rpc/types.rs` |
 | GUI 事件 DTO（封闭，不伪装协议事件） | `onemoreGui/src-tauri/src/rpc/events.rs` |
-| 审批 modal / transcript / composer | `onemoreGui/src/components/*` |
+| 审批浮层 / transcript / composer | `onemoreGui/src/components/*` |
 
 ---
 

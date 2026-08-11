@@ -44,8 +44,9 @@
 | 3.3 | 会话重命名 / 删除 | cc-gui 的 hover 操作 + 确认 popover | [适配] |
 | 3.4 | 新建会话 / 清空对话 | 已有,按 cc-gui 顶部按钮样式 | [适配] |
 | 3.5 | 历史会话加载 | onemore `load_session`,已有基础 | [适配] |
-| 3.6 | fork / rewind | onemore 协议无对应命令 | [跳过] |
-| 3.7 | 子代理树(subagent) | onemore 协议无 subagent 概念 | [跳过] |
+| 3.6 | 后台任务维护 | 每个受管任务独立 RPC 进程和 reducer 状态；切换工作区/会话不终止 loop，侧栏显示运行、等待审批、失败、完成 | [适配] |
+| 3.7 | fork / rewind | onemore 协议无对应命令 | [跳过] |
+| 3.8 | 子代理树(subagent) | onemore 协议无 subagent 概念 | [跳过] |
 
 ## 4. 聊天画布(Messages)
 
@@ -92,7 +93,7 @@
 
 | # | 功能 | 说明 | 标注 |
 |---|------|------|------|
-| 7.1 | 审批对话框 | 已有(once/session/deny),按 cc-gui ApprovalToasts 样式重做为内联卡片 | [适配] |
+| 7.1 | 审批浮层 | 已有(once/session/deny)，展示 RPC v3 的 command/cwd/targets，按 cc-gui ApprovalToasts 样式实现 | [适配] |
 | 7.2 | 批量审批 | 多条待审批合并 | [适配] |
 | 7.3 | 错误/通知 toast | cc-gui toasts.css | [复用] |
 | 7.4 | 通知声音 | 完成/错误提示音(cc-gui assets/sounds) | [复用] |
@@ -112,7 +113,7 @@
 |---|------|------|------|
 | 8.1 | 设置窗口框架 | 左侧导航 + 右侧分区(cc-gui settings.part2 视觉) | [复用] |
 | 8.2 | **基础设置** = 外观调整 | 主题(默认/跟随系统/浅色/深色)、用户消息颜色、UI 缩放、UI/代码字体。**不做**窗口透明度/毛玻璃 | [适配] |
-| 8.3 | **配置** = 可视化 config.toml | 解析 onemore 配置:agent(provider/shell/max_turns)、retry、compaction、permissions、providers + 每 provider 的 models 子表,表单化编辑(填表);保留"高级:原始 TOML 编辑"兜底 | [适配] |
+| 8.3 | **配置** = 可视化 config.toml | 覆盖 agent、retry、compaction、permissions、providers/models、Web 搜索（位置/域名/外部厂商凭据）和 MCP servers（启动/环境/超时/审批/工具过滤）；保留原始 TOML 编辑。保存仅影响新建或重启的 RPC 任务 | [适配] |
 | 8.4 | **项目** = 工作区管理 | 工作区列表、添加/删除/重命名、分组管理(用户确认保留分组) | [适配] |
 | 8.5 | **会话** = 会话管理 | **按工作区分类**列出所有会话,支持删除、重命名 | [适配] |
 | 8.6 | 关于页 | 版本、协议信息(用户确认保留) | [适配] |
@@ -136,7 +137,7 @@
 | 10.3 | 代码预览/文件编辑 | 文件查看器 | [跳过] |
 | 10.4 | 看板 / 任务中心 | kanban | [跳过] |
 | 10.5 | 项目地图 / 项目记忆 / Context Ledger | 依赖 cc-gui 后端扫描 | [跳过] |
-| 10.6 | MCP / Skills 管理 | onemore 协议无对应命令 | [跳过] |
+| 10.6 | MCP / Skills 运行时管理 | 不扩张 RPC 命令；MCP 启动配置已纳入 config.toml 可视化编辑 | [跳过] |
 | 10.7 | 多引擎 | cc-gui 支持 Claude/Codex/Gemini/OpenCode;onemore 单一引擎 | [跳过] |
 | 10.8 | 浏览器 agent / 邮件 / 计算机使用 | cc-gui 特有 | [跳过] |
 | 10.9 | 自动更新 | 依赖发布渠道 | [跳过] |

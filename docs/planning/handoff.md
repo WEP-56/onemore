@@ -1,20 +1,69 @@
 # Onemore 开发接力
 
-更新日期：2026-08-10
+更新日期：2026-08-11
 
 ## 当前目标
 
-当前有两个开发目标：
+本轮处理四个紧密相关的目标：
 
-1. P0：修复 TUI 中 `Esc` 不能及时取消当前步骤的问题。
-2. P1：浏览器控制，范围、实现顺序和验收标准见[当前开发目标](next-phase-goals.md)。
+1. P0：按最新 SDK 实现修补 JSONL RPC v3 契约、投影与回归测试。
+2. P0：同步补齐 `Gui-rpc-example` 对完整 RPC v3 的接收、reducer 和展示能力。
+3. P0：桌面端按受管任务维护独立 RPC 连接，切换工作区/会话不终止后台 loop。
+4. P0：按最新 `config.example.toml` 补齐 Web 与 MCP servers 可视化配置。
 
-现有 Web 搜索能力按当前契约维护，不再借浏览器控制扩展其他 Web 协议或抓取能力。
+`docs/protocol/rpc-sdk-design.md` 与 `docs/architecture/runtime-architecture.md` 中现有的
+2026-08-11 改动是本轮对账后的目标规格，必须保留，不能回退。
 
-TUI 交互和渲染优先参考同技术栈实现 `example/tui`，但接入时仍以 Onemore 的
-`SessionController`、`SessionEvents` 和权威 snapshot 为准，不能引入第二套运行状态。
+边界很窄的 stdio MCP 客户端已经接入并完成测试。本轮不继续扩张 MCP：不增加 MCP 专属 RPC
+DTO、capability、命令或持久化；远端工具继续通过既有 tool progress/transcript、审批、notice
+和清洗后的 `content` 呈现。
 
-## P0：`Esc` 及时取消
+`Esc` 及时取消和浏览器控制仍是后续事项，但明确不在下一会话实现。浏览器范围继续见
+[当前开发目标](next-phase-goals.md)。
+
+## P0：RPC v3 与 GUI 示例同步
+
+### 已完成的文档对账
+
+- `ProgressEvent` 文档原先只列出 14 个事件，现已按代码补齐遗漏的 10 个：
+  `user_message`、`assistant_finished`、`tool_call_pending`、`error`、`plan_updated`、
+  `skills_discovered`、`usage`、`conversation_cleared`、`model_selection_changed`、
+  `sessions_listed`。排队输入和 session 载入不发专用 progress，只反映在 snapshot。
+- `ApprovalRequestView` 已补 `command`、`cwd`、`targets`，§7.4 wire 示例也已改为当前形状。
+- §3 已按代码修正 SDK 签名：`list_models()` 返回 `Vec<ModelMetadata>`，补列
+  `server_info()`，`shutdown()` 返回 `CommandReceipt`，审批接收 `ApprovalResponseView`，
+  `SessionEvents::recv` 使用实际 channel error 类型。
+- §5.3/§5.6 已统一工具输出语义：不暴露任意 `details` 原始 JSON；清洗限长后的
+  `ToolOutput.model_text` 就是公开 `content`。transcript tool 没有独立 `error` 字段，失败正文
+  由 `output` 携带。
+- Runtime 架构图已补 `src/mcp`、`src/process`，更新 builder/commands 职责、
+  `mcp_servers()` 注入点及 `/reload` 重建 MCP server epoch 的语义。
+
+### 施工范围（已完成）
+
+1. 以两份已修改文档为规格，对账 `src/sdk/view.rs`、`src/sdk/controller.rs`、
+   `src/runtime/session_events.rs`、`src/rpc.rs` 与 `src/rpc/`；只修真实存在的 RPC v3 偏差。
+2. 补强 wire tests，覆盖完整 progress 集合、审批结构化字段、失败工具 transcript/output、
+   snapshot-only 的队列与 session load，以及 MCP 通过通用 tool/notice 路径呈现。
+3. 同步 `Gui-rpc-example/onemoreGui/src/rpc/protocol.ts`、`reducer.ts`、app store 和相关组件。
+   每个公开事件都要么明确更新临时状态，要么明确交给后续 snapshot 校正，不能静默漏掉。
+4. `assistant_finished` 应校正流式正文；plan、skills、usage、clear、model selection 和 session list
+   应与 snapshot 保持一致；审批界面展示 `command/cwd/targets`；失败工具从 `output` 读取正文。
+5. 更新 `Gui-rpc-example/rpc-example.md`、README 或 feature list 中仍与 wire 不一致的示例。
+6. Tauri 后端以 `connection_id` 管理多个 RPC handle，前端按连接缓存独立 reducer 状态并显示
+   后台任务的运行、等待审批、失败和完成状态。
+7. config DTO、`toml_edit` 增量更新器和可视化表单已覆盖 `[web]`、`[web.location]`、
+   `[web.backends.*]` 与 `[[mcp_servers]]`；配置保存只影响之后新建或重启的 RPC 任务。
+
+### 明确不做
+
+- 不提升 RPC 版本，不增加 v3 必填字段，不把内部 `AgentCommand` 直接暴露为 wire DTO。
+- 不为 `/reload`、`/mcp` 增加 RPC 命令或 MCP 运行时管理页；RPC 客户端需要新 epoch 时仍重启子进程。
+- 不增加 MCP 专属事件、来源 DTO、结构化 capability 或 GUI 管理页面。
+- 不顺带实现 `Esc` 取消、浏览器控制、Web runtime/protocol 扩展或 GUI 大规模视觉重构。
+- 不重构 SDK/runtime 所有权边界；补丁以文档和当前实现对齐为止。
+
+## 后续：`Esc` 及时取消
 
 ### 现象
 
@@ -74,16 +123,15 @@ TUI 运行中按 `Esc` 后会立即显示“取消中…”，但经常要等当
 
 ## 工作入口
 
-开始实现前建议依次阅读：
+下一会话建议依次阅读：
 
-1. [当前开发目标](next-phase-goals.md)
+1. [Rust SDK 与 JSONL RPC v3](../protocol/rpc-sdk-design.md)
 2. [Runtime 结构与弱 Harness 边界](../architecture/runtime-architecture.md)
-3. [Workspace 与 Web 工具](../architecture/workspace-and-web-tools.md)
-4. `src/tui/mod.rs`、`src/sdk/controller.rs`、`src/runtime/session_runtime.rs`
-5. `src/provider/mod.rs`、`src/provider/sse.rs`、两个 provider adapter
-6. `src/runtime/tool_execution.rs`、`src/tools/run_command.rs`、`src/web/http_client.rs`
-7. `src/runtime/tests/session_runtime.rs`、`src/runtime/tests/concurrency.rs`
-8. `example/tui`
+3. `src/sdk/view.rs`、`src/sdk/controller.rs`、`src/runtime/session_events.rs`
+4. `src/rpc.rs`、`src/rpc/`、`src/rpc/tests.rs`
+5. `Gui-rpc-example/onemoreGui/src/rpc/protocol.ts` 与 `reducer.ts`
+6. `Gui-rpc-example/onemoreGui/src/app/store.ts` 和相关展示组件
+7. `Gui-rpc-example/rpc-example.md`、`Gui-rpc-example/README.md`
 
 代码变更至少执行：
 
@@ -91,5 +139,8 @@ TUI 运行中按 `Esc` 后会立即显示“取消中…”，但经常要等当
 cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
+Push-Location Gui-rpc-example/onemoreGui
+npm run build
+Pop-Location
 git diff --check
 ```
