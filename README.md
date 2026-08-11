@@ -10,6 +10,28 @@
 
 Onemore 是从 [Zerone](https://github.com/WEP-56/zerone) 教学基线迁移出的独立 coding agent 工程
 
+## Hi!
+onemore对我来说是什么？
+
+我不把它当作一个可以完全信任的企业级的 coding agent，它也没有开源的 Pi、Opencode 一样功能全面。
+
+它是我学习成果、对”弱harness“这一理念的个人理解的象征（关于这点具体请看这篇博客：[Mechanically Strong, Cognitively Weak](https://taoran.weppp.cyou/posts/agent/)）
+
+当然，它完全可以长时间的任务，它的其中一个漂亮的示例是：
+[GUI-EXAMPLE](Gui-rpc-example)
++
+[sdk](src/sdk)
+
+![Gui](docs/image.png)
+
+说实话，虽然公公又式式，但我觉得它挺漂亮！
+
+这是由deepseek v4 flash 0731 在 onemore重实现的。我为它创建了一个分支（现在已经合并了），它持续运行了五个小时，经历了10次自动上下文压缩。完成了完整的rpc-json协议，并制作了那个 tauri+react 的Gui
+
+我只给了deepseek 一个agents.md（让它禁止独立造轮子，写ui、写协议先找源码或skill） 和一句任务 “老哥，帮我给 onemore 加个 rpc-json 协议，写好文档后再做一个漂亮的Gui作为范例，谢了” ，不久后它就完成了。
+
+如果你被某篇文章、评论引来，想要学习、做agent，那我不推荐你看这个仓库。欢迎查看： [Zerone](https://github.com/WEP-56/zerone) 里的文档，顺便再自己实践一下
+
 ## 运行
 
 ```powershell
