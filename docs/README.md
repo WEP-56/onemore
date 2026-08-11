@@ -24,6 +24,7 @@
 
 - [开发接力](planning/handoff.md)
 - [当前开发目标](planning/next-phase-goals.md)
+- [MCP 客户端接入实现计划](planning/mcp-client-plan.md)
 
 ## 调研与项目
 

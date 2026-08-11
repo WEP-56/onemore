@@ -165,7 +165,34 @@ struct FileConfig {
     #[serde(default)]
     web: WebSection,
     #[serde(default)]
+    mcp_servers: Vec<RawMcpServerSection>,
+    #[serde(default)]
     providers: BTreeMap<String, RawProviderSection>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServerSection {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    startup_timeout_ms: Option<u64>,
+    #[serde(default)]
+    call_timeout_ms: Option<u64>,
+    #[serde(default)]
+    always_ask: Option<bool>,
+    #[serde(default)]
+    include_tools: Option<Vec<String>>,
+    #[serde(default)]
+    exclude_tools: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -361,6 +388,88 @@ impl ModelReasoning {
     }
 }
 
+/// 一个 stdio MCP server 的启动与治理配置(`[[mcp_servers]]`)。
+/// server 是不受信的外部进程;这里只描述怎么启动与怎么收紧,放宽不存在。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerConfig {
+    /// 工具前缀(`mcp__{name}__{tool}`),须匹配 `^[a-z0-9][a-z0-9_-]{0,31}$`。
+    pub name: String,
+    /// 可执行文件,不经 shell 解析。Windows 上 npm 系 server 写
+    /// `command = "cmd"`、`args = ["/c", "npx", ...]`。
+    pub command: String,
+    pub args: Vec<String>,
+    /// 叠加在继承环境之上;注意环境中的敏感变量对 server 进程可见。
+    pub env: Vec<(String, String)>,
+    pub cwd: Option<PathBuf>,
+    pub enabled: bool,
+    /// spawn、era 探测与 tools/list 的总预算。npx 首次运行会下载包,留足余量。
+    pub startup_timeout: std::time::Duration,
+    /// 单次 tools/call 预算,超时后发送 cancelled 通知并返回超时错误。
+    pub call_timeout: std::time::Duration,
+    /// 只可收紧:true 时该 server 全部工具逐次审批,不提供 session 授权。
+    pub always_ask: bool,
+    /// 按 server 侧原始工具名精确过滤;None 表示不过滤。
+    pub include_tools: Option<Vec<String>>,
+    pub exclude_tools: Vec<String>,
+}
+
+const DEFAULT_MCP_STARTUP_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_MCP_CALL_TIMEOUT_MS: u64 = 60_000;
+
+fn normalize_mcp_server(
+    raw: RawMcpServerSection,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<McpServerConfig> {
+    let name = raw.name.trim().to_string();
+    let head_valid = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let body_valid = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if name.is_empty() || name.len() > 32 || !head_valid || !body_valid {
+        bail!(
+            "[[mcp_servers]].name {:?} 无效:须匹配 ^[a-z0-9][a-z0-9_-]{{0,31}}$",
+            raw.name
+        );
+    }
+    if !seen.insert(name.clone()) {
+        bail!("[[mcp_servers]] 存在重复的 name {:?}", name);
+    }
+    if raw.command.trim().is_empty() {
+        bail!("[[mcp_servers]] {} 的 command 不能为空", name);
+    }
+    let startup_timeout_ms = raw
+        .startup_timeout_ms
+        .unwrap_or(DEFAULT_MCP_STARTUP_TIMEOUT_MS);
+    let call_timeout_ms = raw.call_timeout_ms.unwrap_or(DEFAULT_MCP_CALL_TIMEOUT_MS);
+    if startup_timeout_ms == 0 || call_timeout_ms == 0 {
+        bail!(
+            "[[mcp_servers]] {} 的 startup_timeout_ms/call_timeout_ms 必须大于 0",
+            name
+        );
+    }
+    for key in raw.env.keys() {
+        if key.trim().is_empty() || key.chars().any(char::is_control) {
+            bail!("[[mcp_servers]] {} 的 env 含空名或控制字符", name);
+        }
+    }
+    Ok(McpServerConfig {
+        name,
+        command: raw.command.trim().to_string(),
+        args: raw.args,
+        env: raw.env.into_iter().collect(),
+        cwd: raw.cwd,
+        enabled: raw.enabled.unwrap_or(true),
+        startup_timeout: std::time::Duration::from_millis(startup_timeout_ms),
+        call_timeout: std::time::Duration::from_millis(call_timeout_ms),
+        always_ask: raw.always_ask.unwrap_or(false),
+        include_tools: raw.include_tools,
+        exclude_tools: raw.exclude_tools,
+    })
+}
+
 /// 校验过的配置。
 #[derive(Debug)]
 pub struct Config {
@@ -376,6 +485,8 @@ pub struct Config {
     pub tool_timeout: Option<std::time::Duration>,
     pub compaction: CompactionSettings,
     pub permission_rules: PermissionRules,
+    /// stdio MCP server 列表;空表示完全不装配 MCP 能力。
+    pub mcp_servers: Vec<McpServerConfig>,
     web_mode: WebMode,
     web_search: WebSearchSettings,
     external_web_backends: Vec<WebSearchBackendKind>,
@@ -585,6 +696,12 @@ impl Config {
             }),
         )
         .map_err(|error| anyhow!("[web] {error}"))?;
+        let mut seen_mcp_names = std::collections::HashSet::new();
+        let mcp_servers = raw
+            .mcp_servers
+            .into_iter()
+            .map(|server| normalize_mcp_server(server, &mut seen_mcp_names))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Config {
             source_path: Some(path.to_path_buf()),
             active_provider: raw.agent.provider,
@@ -599,6 +716,7 @@ impl Config {
                 .map(std::time::Duration::from_secs),
             compaction,
             permission_rules,
+            mcp_servers,
             web_mode,
             web_search,
             external_web_backends,
@@ -1172,6 +1290,25 @@ mode = "auto"
 # [web.backends.serper]
 # api_key = "..."
 # 如果使用环境变量，请删除对应 api_key，改为 api_key_env = "SERPER_API_KEY"
+
+# ---- MCP servers(stdio)----
+# 外部 MCP server 以子进程接入，工具以 mcp__{name}__ 前缀注册；详见
+# docs/planning/mcp-client-plan.md。server 属于不受信第三方：工具调用默认逐次
+# 审批(可在会话内按工具授权)，server 声明的 annotations 不会放宽权限。
+# [[mcp_servers]]
+# name = "playwright"               # 必填：工具前缀，须匹配 ^[a-z0-9][a-z0-9_-]{0,31}$
+# command = "cmd"                   # 必填：可执行文件，不经 shell 解析
+# args = ["/c", "npx", "-y", "@playwright/mcp@latest"]
+# # Windows 上 npm 系 server 需经 cmd /c 启动；npx 首次运行会下载包，
+# # 启动超时请留足或预先全局安装。
+# # env = { KEY = "value" }         # 叠加在继承环境上；环境中的敏感变量对 server 可见
+# # cwd = "E:/somewhere"            # 缺省继承 Onemore 工作目录
+# # enabled = true
+# # startup_timeout_ms = 30000      # spawn + 协议探测 + tools/list 的总预算
+# # call_timeout_ms = 60000         # 单次工具调用预算，超时会通知 server 取消
+# # always_ask = true               # 只可收紧：该 server 全部工具逐次审批
+# # include_tools = ["browser_navigate", "browser_click"]  # 按 server 侧原始名精确过滤
+# # exclude_tools = []
 
 # ---- Anthropic Messages API ----
 [providers.anthropic]

@@ -271,7 +271,14 @@ fn rank(rule: PermissionRule) -> u8 {
 }
 
 fn grant_key(call: &PreparedToolCall) -> String {
-    format!("{}\n{}", call.spec.name, call.arguments)
+    // 按名授权(MCP 远端工具):同名工具在 session 内一次审批即可,参数不参与
+    // 匹配。默认仍是"工具名 + 完整参数"的精确授权;always_ask 工具不会走到
+    // session grant,因此该声明放不宽高危边界。
+    if call.spec.permission.session_grant_by_name {
+        format!("{}\n<session-grant-by-name>", call.spec.name)
+    } else {
+        format!("{}\n{}", call.spec.name, call.arguments)
+    }
 }
 
 fn canonicalize_nearest(path: &Path) -> std::io::Result<PathBuf> {
@@ -492,6 +499,56 @@ mod tests {
         assert!(matches!(
             manager.evaluate(&second, &workspace),
             PermissionDecision::Ask { .. }
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn name_scoped_session_grant_covers_changing_arguments_but_not_always_ask() {
+        // MCP 远端工具:参数每次都不同,声明按名授权后一次审批覆盖同名后续调用。
+        let root = temp_root("name-grant");
+        let workspace = Workspace::new(root.clone());
+        let mut manager = PermissionManager::new(PermissionRules::default());
+        let by_name = ToolPermissionSpec {
+            session_grant_by_name: true,
+            ..ToolPermissionSpec::default()
+        };
+        let first = prepared(
+            ToolCapabilities::MUTATION,
+            by_name.clone(),
+            json!({ "path": "one" }),
+        );
+        let second = prepared(
+            ToolCapabilities::MUTATION,
+            by_name,
+            json!({ "path": "two" }),
+        );
+        assert!(matches!(
+            manager.evaluate(&first, &workspace),
+            PermissionDecision::Ask { scopes, .. } if scopes.contains(&ApprovalScope::Session)
+        ));
+        manager.remember_session_grant(&first);
+        assert_eq!(
+            manager.evaluate(&second, &workspace),
+            PermissionDecision::Allow
+        );
+
+        // always_ask 优先:即使声明按名授权,高危边界仍然只有 Once,
+        // session grant 不生效。
+        let forced = ToolPermissionSpec {
+            always_ask: true,
+            session_grant_by_name: true,
+            ..ToolPermissionSpec::default()
+        };
+        let call = prepared(
+            ToolCapabilities::MUTATION,
+            forced,
+            json!({ "path": "three" }),
+        );
+        manager.remember_session_grant(&call);
+        assert!(matches!(
+            manager.evaluate(&call, &workspace),
+            PermissionDecision::Ask { scopes, .. } if scopes == vec![ApprovalScope::Once]
         ));
         let _ = std::fs::remove_dir_all(root);
     }

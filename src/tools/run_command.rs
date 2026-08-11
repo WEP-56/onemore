@@ -25,12 +25,14 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+use crate::process::{kill_tree, ProcessJob};
 
 use super::{
     optional_u64, require_str, CommandSyntax, Tool, ToolCapabilities, ToolContext, ToolError,
@@ -508,87 +510,6 @@ fn output_tail(stdout: &[u8], stderr: &[u8]) -> String {
 fn lossy_tail(bytes: &[u8]) -> String {
     let start = bytes.len().saturating_sub(PROGRESS_TAIL_BYTES);
     String::from_utf8_lossy(&bytes[start..]).into_owned()
-}
-
-#[cfg(windows)]
-struct ProcessJob {
-    handle: windows_sys::Win32::Foundation::HANDLE,
-}
-
-#[cfg(windows)]
-impl ProcessJob {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        let job = Self { handle };
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let configured = unsafe {
-            SetInformationJobObject(
-                job.handle,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if configured == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let process = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-        if unsafe { AssignProcessToJobObject(job.handle, process) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(job)
-    }
-
-    fn terminate(&self) -> bool {
-        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1) != 0 }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for ProcessJob {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-struct ProcessJob;
-
-#[cfg(not(windows))]
-impl ProcessJob {
-    fn attach(_child: &Child) -> std::io::Result<Self> {
-        Ok(Self)
-    }
-}
-
-/// 终止整棵进程树。Windows 优先终止 Job Object，无法绑定时回退 taskkill /T。
-fn kill_tree(child: &mut Child, process_job: Option<&ProcessJob>) {
-    #[cfg(windows)]
-    let job_terminated = process_job.is_some_and(ProcessJob::terminate);
-    #[cfg(not(windows))]
-    let job_terminated = false;
-
-    if cfg!(windows) && !job_terminated {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
 }
 
 #[cfg(test)]

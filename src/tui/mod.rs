@@ -83,8 +83,10 @@ const HELP_TEXT: &str = "斜杠命令\n\
   /session [ID|all]  列出或恢复历史会话；all 显示其他 workspace\n\
   /skill [名称]       选择并加载一个本地技能\n\
   /tools [调用 ID]   浏览工具调用，或按 ID 打开完整输出\n\
+  /mcp               查看 MCP server 状态(era、工具数、故障)\n\
   /compact           压缩历史(摘要替代模型视图,事实保留)\n\
   /queue <内容>      排队后续任务(当前任务结束后执行)\n\
+  /reload            重新加载配置、项目指令、skills 与 MCP servers\n\
   /clear             清空会话\n\
   /quit              退出\n\
 \n\
@@ -1822,6 +1824,9 @@ impl App {
             }
             command::SlashCommand::Reload => {
                 self.runtime.submit(AgentCommand::Reload);
+            }
+            command::SlashCommand::Mcp => {
+                self.runtime.submit(AgentCommand::McpStatus);
             }
             command::SlashCommand::Queue => {
                 if rest.is_empty() {

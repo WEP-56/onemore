@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::compaction::CompactionSettings;
-use crate::config::{Config, ProviderSettings};
+use crate::config::{Config, McpServerConfig, ProviderSettings};
 use crate::context::instructions::Instructions;
 use crate::context::project_instructions::ProjectInstructions;
 use crate::context::skills::SkillsContext;
@@ -64,6 +64,7 @@ pub struct AgentBuilder {
     hooks: Option<HookRegistry>,
     retry_policy: RetryPolicy,
     compaction_settings: CompactionSettings,
+    mcp_servers: Vec<McpServerConfig>,
 }
 
 impl AgentBuilder {
@@ -76,6 +77,7 @@ impl AgentBuilder {
         let tool_timeout = config.tool_timeout;
         let compaction_settings = config.compaction;
         let permission_rules = config.permission_rules;
+        let mcp_servers = config.mcp_servers.clone();
         let mut builder = Self::with_models(Box::new(config), workspace);
         builder.shell = shell;
         builder.system_prompt = system_prompt;
@@ -85,6 +87,7 @@ impl AgentBuilder {
         builder.compaction_settings = compaction_settings;
         builder.permission_rules = permission_rules;
         builder.config_path = config_path;
+        builder.mcp_servers = mcp_servers;
         builder
     }
 
@@ -123,6 +126,7 @@ impl AgentBuilder {
             hooks: None,
             retry_policy: RetryPolicy::default(),
             compaction_settings: CompactionSettings::default(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -242,6 +246,13 @@ impl AgentBuilder {
         self
     }
 
+    /// stdio MCP server 列表(默认取自 `Config`)。只在使用默认工具装配时生效;
+    /// host-owned registry 由宿主自行组合工具。
+    pub fn mcp_servers(mut self, servers: Vec<McpServerConfig>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+
     pub fn build(self) -> anyhow::Result<Agent> {
         if self.max_turns == 0 {
             anyhow::bail!("max_turns 必须大于 0");
@@ -351,6 +362,31 @@ impl AgentBuilder {
             .map_err(anyhow::Error::msg)?,
         };
         let provider = (self.provider_factory)(settings);
+        let mut tools = tools;
+        let mut mcp = crate::mcp::McpHost::empty();
+        let mut mcp_notices: Vec<String> = Vec::new();
+        if !self.mcp_servers.is_empty() {
+            if default_tools {
+                let outcome =
+                    crate::mcp::McpHost::start(&self.mcp_servers, &|name| tools.contains(name));
+                let artifacts_dir = paths.as_ref().map(|paths| paths.root.join("mcp-artifacts"));
+                let proxies: Vec<Box<dyn crate::tools::Tool>> = outcome
+                    .seeds
+                    .into_iter()
+                    .map(|seed| {
+                        Box::new(crate::tools::mcp_proxy::McpTool::from_seed(
+                            seed,
+                            artifacts_dir.clone(),
+                        )) as Box<dyn crate::tools::Tool>
+                    })
+                    .collect();
+                tools.add_tools(proxies);
+                mcp = outcome.host;
+                mcp_notices = outcome.notices;
+            } else {
+                mcp_notices.push("host-owned tool registry:已跳过 [[mcp_servers]] 装配".into());
+            }
+        }
         let sessions: Box<dyn SessionBackend> = match self.session_backend {
             Some(backend) => backend,
             None => {
@@ -377,10 +413,14 @@ impl AgentBuilder {
             });
         }
         startup_events.push_back(AgentEvent::Notice(format!("Web capability: {}", web_label)));
+        for notice in mcp_notices {
+            startup_events.push_back(AgentEvent::Notice(notice));
+        }
 
         Ok(Agent {
             workspace: self.workspace,
             tools,
+            mcp,
             entries: Vec::new(),
             extra_context,
             provider,

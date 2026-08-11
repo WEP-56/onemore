@@ -39,6 +39,8 @@ pub enum AgentCommand {
     Compact,
     /// 重新读取配置、项目指令和默认 skill catalog；只在空闲时执行。
     Reload,
+    /// 报告 MCP server 状态(era、工具数、最近故障与 stderr 线索)。
+    McpStatus,
     /// 清空会话历史(/clear)。
     ClearConversation,
     /// 切换到 config.toml 里的另一个 provider profile(/provider)。

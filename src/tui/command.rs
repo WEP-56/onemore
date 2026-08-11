@@ -11,6 +11,7 @@ pub enum SlashCommand {
     Session,
     Skill,
     Tools,
+    Mcp,
     Queue,
     Compact,
     Reload,
@@ -66,6 +67,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         accepts_args: true,
     },
     CommandSpec {
+        command: SlashCommand::Mcp,
+        name: "mcp",
+        description: "查看 MCP server 状态(era、工具数、故障)",
+        accepts_args: false,
+    },
+    CommandSpec {
         command: SlashCommand::Queue,
         name: "queue",
         description: "排队后续任务,当前任务结束后执行",
@@ -80,7 +87,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         command: SlashCommand::Reload,
         name: "reload",
-        description: "重新加载配置、项目指令和 skills",
+        description: "重新加载配置、项目指令、skills 与 MCP servers",
         accepts_args: false,
     },
     CommandSpec {

@@ -567,3 +567,119 @@ context_window = 32000
             .contains("只能配置 api_key 或 api_key_env")
     );
 }
+
+#[test]
+fn mcp_servers_parse_with_defaults_and_normalization() {
+    let config = load_config(
+        r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+[[mcp_servers]]
+name = "playwright"
+command = "cmd"
+args = ["/c", "npx", "-y", "@playwright/mcp@latest"]
+[[mcp_servers]]
+name = "tuned"
+command = " node "
+env = { FOO = "bar" }
+enabled = false
+startup_timeout_ms = 5000
+call_timeout_ms = 1000
+always_ask = true
+include_tools = ["a"]
+exclude_tools = ["b"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.mcp_servers.len(), 2);
+    let default = &config.mcp_servers[0];
+    assert_eq!(default.name, "playwright");
+    assert!(default.enabled);
+    assert!(!default.always_ask);
+    assert_eq!(default.startup_timeout, Duration::from_millis(30_000));
+    assert_eq!(default.call_timeout, Duration::from_millis(60_000));
+    assert_eq!(default.include_tools, None);
+    let tuned = &config.mcp_servers[1];
+    assert_eq!(tuned.command, "node");
+    assert_eq!(tuned.env, vec![("FOO".to_string(), "bar".to_string())]);
+    assert!(!tuned.enabled);
+    assert!(tuned.always_ask);
+    assert_eq!(tuned.startup_timeout, Duration::from_millis(5000));
+    assert_eq!(tuned.call_timeout, Duration::from_millis(1000));
+    assert_eq!(tuned.include_tools.as_deref(), Some(&["a".to_string()][..]));
+    assert_eq!(tuned.exclude_tools, vec!["b".to_string()]);
+
+    // 未配置任何 [[mcp_servers]] 时为空列表,不装配 MCP 能力。
+    let empty = load_config(
+        r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+"#,
+    )
+    .unwrap();
+    assert!(empty.mcp_servers.is_empty());
+}
+
+#[test]
+fn mcp_servers_reject_invalid_names_duplicates_and_bad_limits() {
+    let base = |server: &str| {
+        format!(
+            r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "https://example.invalid/v1"
+api_key = ""
+model = "model"
+{server}
+"#
+        )
+    };
+    for (server, expected) in [
+        (
+            "[[mcp_servers]]\nname = \"Bad-Name\"\ncommand = \"x\"",
+            "name",
+        ),
+        (
+            "[[mcp_servers]]\nname = \"-lead\"\ncommand = \"x\"",
+            "name",
+        ),
+        (
+            &format!(
+                "[[mcp_servers]]\nname = \"{}\"\ncommand = \"x\"",
+                "a".repeat(40)
+            ),
+            "name",
+        ),
+        (
+            "[[mcp_servers]]\nname = \"dup\"\ncommand = \"x\"\n[[mcp_servers]]\nname = \"dup\"\ncommand = \"y\"",
+            "重复",
+        ),
+        ("[[mcp_servers]]\nname = \"ok\"\ncommand = \"  \"", "command"),
+        (
+            "[[mcp_servers]]\nname = \"ok\"\ncommand = \"x\"\nstartup_timeout_ms = 0",
+            "必须大于 0",
+        ),
+        (
+            "[[mcp_servers]]\nname = \"ok\"\ncommand = \"x\"\nunknown_field = 1",
+            "unknown",
+        ),
+    ] {
+        let error = format!("{:#}", load_config(&base(server)).unwrap_err());
+        assert!(
+            error.contains(expected),
+            "配置 {server:?} 的报错应包含 {expected:?},实际: {error}"
+        );
+    }
+}

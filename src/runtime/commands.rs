@@ -99,6 +99,13 @@ impl Agent {
         inbox: Option<&dyn CommandInbox>,
     ) -> HandleReport {
         self.emit_startup_events(emit);
+        // legacy MCP server 可能自发报告工具列表变化;registry 在 epoch 内冻结,
+        // 只转一条建议 /reload 的提示。
+        for name in self.mcp.take_list_changed() {
+            emit(AgentEvent::Notice(format!(
+                "MCP server {name} 报告工具列表已变化;执行 /reload 后生效"
+            )));
+        }
         match cmd {
             // 空闲时三者等价:都开启一个新的运行。
             AgentCommand::UserInput(text)
@@ -126,6 +133,15 @@ impl Agent {
             }
             AgentCommand::Reload => {
                 self.reload(emit);
+                HandleReport {
+                    keep_running: true,
+                    run: None,
+                }
+            }
+            AgentCommand::McpStatus => {
+                for line in self.mcp.status_lines() {
+                    emit(AgentEvent::Notice(line));
+                }
                 HandleReport {
                     keep_running: true,
                     run: None,
@@ -339,6 +355,7 @@ impl Agent {
             extra_context = Some(providers);
         }
 
+        let mcp_servers = config.mcp_servers.clone();
         let models: Box<dyn crate::harness::ModelRegistry> = Box::new(config);
         let mut selection = match models.initial_selection() {
             Ok(selection) => selection,
@@ -422,6 +439,39 @@ impl Agent {
         self.permissions = PermissionManager::new(permission_rules);
         self.config_path = config_path;
         self.data_root = Some(paths.root);
+        if self.default_tools {
+            // MCP epoch 随 reload 整体重建:先关停旧 server 进程,再按新配置启动。
+            // 单个 server 失败只降级自身,reload 本身不失败。
+            self.mcp.shutdown();
+            self.mcp = crate::mcp::McpHost::empty();
+            if !mcp_servers.is_empty() {
+                let outcome =
+                    crate::mcp::McpHost::start(&mcp_servers, &|name| self.tools.contains(name));
+                let artifacts_dir = self
+                    .data_root
+                    .as_ref()
+                    .map(|root| root.join("mcp-artifacts"));
+                let proxies: Vec<Box<dyn crate::tools::Tool>> = outcome
+                    .seeds
+                    .into_iter()
+                    .map(|seed| {
+                        Box::new(crate::tools::mcp_proxy::McpTool::from_seed(
+                            seed,
+                            artifacts_dir.clone(),
+                        )) as Box<dyn crate::tools::Tool>
+                    })
+                    .collect();
+                self.tools.add_tools(proxies);
+                self.mcp = outcome.host;
+                for notice in outcome.notices {
+                    emit(AgentEvent::Notice(notice));
+                }
+            }
+        } else if !mcp_servers.is_empty() {
+            emit(AgentEvent::Notice(
+                "host-owned tool registry:已跳过 [[mcp_servers]] 装配".into(),
+            ));
+        }
         if let Some(catalog) = skills {
             emit(AgentEvent::SkillsDiscovered {
                 skills: catalog.ordered.clone(),

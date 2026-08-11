@@ -17,6 +17,7 @@ mod git;
 mod glob;
 mod list_dir;
 mod load_skill;
+pub(crate) mod mcp_proxy;
 mod read_file;
 mod run_command;
 mod search;
@@ -84,6 +85,10 @@ pub struct ToolPermissionSpec {
     pub path_arguments: Vec<String>,
     pub always_ask: bool,
     pub command: Option<CommandPermissionSpec>,
+    /// Session 授权的粒度。默认按"工具名 + 完整参数"精确匹配;每次参数都不同的
+    /// 远端工具(MCP)可声明按工具名授权,避免同一工具反复审批。`always_ask`
+    /// 优先:高危边界仍然只有 Once,不受此字段影响。
+    pub session_grant_by_name: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +114,7 @@ impl ToolPermissionSpec {
                 .collect(),
             always_ask: false,
             command: None,
+            session_grant_by_name: false,
         }
     }
 
@@ -122,6 +128,7 @@ impl ToolPermissionSpec {
                 .collect(),
             always_ask: true,
             command: None,
+            session_grant_by_name: false,
         }
     }
 
@@ -134,6 +141,7 @@ impl ToolPermissionSpec {
                 cwd_argument: cwd_argument.map(str::to_string),
                 syntax,
             }),
+            session_grant_by_name: false,
         }
     }
 }
@@ -276,12 +284,27 @@ impl std::fmt::Display for ToolError {
     }
 }
 
+/// 参数 preflight 的校验来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchemaValidation {
+    /// 用本地 JSON Schema 子集校验器严格 preflight(内置工具)。
+    #[default]
+    Strict,
+    /// schema 由远端权威校验(MCP):server schema 允许完整 JSON Schema 2020-12
+    /// (含 `$ref`),本地子集校验器会误杀;本地只保证参数是 object。
+    ServerAuthoritative,
+}
+
 /// `Send + Sync`:阶段 6 起,ParallelSafe 工具可能在 scoped threads 中并发执行,
 /// 工具实现必须是无内部可变状态的(或自行加锁)。
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn prepare_arguments(&self, args: Value) -> Result<Value, ToolError> {
         Ok(args)
+    }
+    /// 本工具的参数校验模式。默认严格;只有把校验权交给远端的代理工具覆盖它。
+    fn schema_validation(&self) -> SchemaValidation {
+        SchemaValidation::Strict
     }
     fn execute(&self, args: &Value, ctx: &mut ToolContext<'_>) -> Result<ToolOutput, ToolError>;
 }
@@ -358,6 +381,14 @@ impl ToolRegistry {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    /// 追加一批工具(MCP 装配)。调用方负责名字唯一;registry 换代使旧的
+    /// PreparedToolCall 失效。
+    pub(crate) fn add_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        debug_assert!(tools.iter().all(|tool| !self.contains(&tool.spec().name)));
+        self.tools.extend(tools);
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub fn prepare(&self, name: &str, args: &Value) -> Result<PreparedToolCall, ToolError> {
         let Some((tool_index, tool)) = self
             .tools
@@ -379,9 +410,18 @@ impl ToolRegistry {
 
         let spec = tool.spec();
         let arguments = tool.prepare_arguments(args.clone())?;
-        let validation_errors = match validate_json_schema(&spec.schema, &arguments) {
-            Ok(()) => Vec::new(),
-            Err(errors) => errors,
+        let validation_errors = match tool.schema_validation() {
+            SchemaValidation::Strict => match validate_json_schema(&spec.schema, &arguments) {
+                Ok(()) => Vec::new(),
+                Err(errors) => errors,
+            },
+            SchemaValidation::ServerAuthoritative => {
+                if arguments.is_object() {
+                    Vec::new()
+                } else {
+                    vec!["参数必须是 JSON object".into()]
+                }
+            }
         };
         if !validation_errors.is_empty() {
             return Err(ToolError {
@@ -689,6 +729,37 @@ mod tests {
 
     struct ProgressTestTool;
 
+    struct RemoteValidatedTool;
+
+    impl Tool for RemoteValidatedTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "remote".into(),
+                description: "server-authoritative test tool".into(),
+                // 含本地子集校验器会拒绝的内容(缺 required 字段时 Strict 必失败)。
+                schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["must"],
+                    "properties": { "must": { "$ref": "#/$defs/any" } }
+                }),
+                capabilities: ToolCapabilities::MUTATION,
+                permission: ToolPermissionSpec::default(),
+            }
+        }
+
+        fn schema_validation(&self) -> SchemaValidation {
+            SchemaValidation::ServerAuthoritative
+        }
+
+        fn execute(
+            &self,
+            args: &Value,
+            _ctx: &mut ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text(args.to_string()))
+        }
+    }
+
     impl Tool for ProgressTestTool {
         fn spec(&self) -> ToolSpec {
             ToolSpec {
@@ -903,6 +974,37 @@ mod tests {
             updates[0].details,
             Some(serde_json::json!({ "completed": 1 }))
         );
+    }
+
+    #[test]
+    fn server_authoritative_tools_skip_subset_validation_but_require_object() {
+        let registry = ToolRegistry::new(vec![Box::new(RemoteValidatedTool)]);
+        // Strict 模式会因缺少 required 字段拒绝;远端权威模式放行,由 server 校验。
+        assert!(registry.prepare("remote", &serde_json::json!({})).is_ok());
+        let error = registry
+            .prepare("remote", &serde_json::json!("not an object"))
+            .unwrap_err();
+        assert_eq!(error.code, ToolErrorCode::InvalidArguments);
+    }
+
+    #[test]
+    fn add_tools_appends_and_invalidates_prepared_calls() {
+        let mut registry = ToolRegistry::new(vec![Box::new(TypedTestTool {
+            name: "base".into(),
+            fail: false,
+        })]);
+        let prepared = registry.prepare("base", &serde_json::json!({})).unwrap();
+        registry.add_tools(vec![Box::new(TypedTestTool {
+            name: "extra".into(),
+            fail: false,
+        })]);
+        assert!(registry.contains("extra"));
+        let workspace = Workspace::new(PathBuf::from("."));
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_| {};
+        let outcome =
+            registry.execute_prepared(&prepared, &mut context(&workspace, &cancel, &mut progress));
+        assert_eq!(outcome.error.unwrap().code, ToolErrorCode::Conflict);
     }
 
     #[test]

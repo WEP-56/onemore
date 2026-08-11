@@ -71,6 +71,25 @@ mode = "auto"
 # api_key = "..."
 # 如果使用环境变量，请删除对应 api_key，改为 api_key_env = "SERPER_API_KEY"
 
+# ---- MCP servers(stdio)----
+# 外部 MCP server 以子进程接入，工具以 mcp__{name}__ 前缀注册；详见
+# docs/planning/mcp-client-plan.md。server 属于不受信第三方：工具调用默认逐次
+# 审批(可在会话内按工具授权)，server 声明的 annotations 不会放宽权限。
+# [[mcp_servers]]
+# name = "playwright"               # 必填：工具前缀，须匹配 ^[a-z0-9][a-z0-9_-]{0,31}$
+# command = "cmd"                   # 必填：可执行文件，不经 shell 解析
+# args = ["/c", "npx", "-y", "@playwright/mcp@latest"]
+# # Windows 上 npm 系 server 需经 cmd /c 启动；npx 首次运行会下载包，
+# # 启动超时请留足或预先全局安装。
+# # env = { KEY = "value" }         # 叠加在继承环境上；环境中的敏感变量对 server 可见
+# # cwd = "E:/somewhere"            # 缺省继承 Onemore 工作目录
+# # enabled = true
+# # startup_timeout_ms = 30000      # spawn + 协议探测 + tools/list 的总预算
+# # call_timeout_ms = 60000         # 单次工具调用预算，超时会通知 server 取消
+# # always_ask = true               # 只可收紧：该 server 全部工具逐次审批
+# # include_tools = ["browser_navigate", "browser_click"]  # 按 server 侧原始名精确过滤
+# # exclude_tools = []
+
 # ---- Anthropic Messages API ----
 [providers.anthropic]
 api = "messages"

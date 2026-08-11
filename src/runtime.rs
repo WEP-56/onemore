@@ -61,6 +61,9 @@ pub use session_runtime::spawn_session;
 pub struct Agent {
     workspace: Workspace,
     tools: ToolRegistry,
+    /// MCP server 宿主。空表示未装配;/reload 是唯一的重建边界,Drop 时关停
+    /// 全部 server 进程。
+    mcp: crate::mcp::McpHost,
     /// 会话事实日志的内存镜像。只在对应批次成功落库后推进(见 [`Agent::commit`])。
     entries: Vec<SessionEntry>,
     /// 上下文源(system 片段)。想加 Planning/Memory/Workspace Map,往这里 push 即可。

@@ -493,3 +493,78 @@ fn model_selection_updates_budget_records_one_fact_and_persists_effort() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn mcp_server_failure_degrades_without_blocking_agent_build() {
+    let root = temp_root("builder-mcp-degraded");
+    let workspace_root = root.join("workspace");
+    std::fs::create_dir_all(&workspace_root).unwrap();
+    let config_path = root.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[agent]
+provider = "mock"
+[providers.mock]
+api = "responses"
+base_url = "http://127.0.0.1:1"
+api_key = ""
+model = "model"
+[[mcp_servers]]
+name = "missing"
+command = "onemore-definitely-not-a-real-command"
+startup_timeout_ms = 3000
+[[mcp_servers]]
+name = "disabled"
+command = "also-missing"
+enabled = false
+"#,
+    )
+    .unwrap();
+    let config = Config::load(&config_path).unwrap();
+    let mut agent = Agent::builder(config, Workspace::new(workspace_root))
+        .data_dir(root.join("data"))
+        .build()
+        .expect("单个 MCP server 失败不得阻塞 Agent 构建");
+
+    assert!(
+        agent
+            .tools
+            .specs()
+            .iter()
+            .all(|spec| !spec.name.starts_with("mcp__")),
+        "失败的 server 不应注册任何工具"
+    );
+
+    let mut events = Vec::new();
+    let cancel = AtomicBool::new(false);
+    agent.handle_command(
+        crate::event::AgentCommand::McpStatus,
+        &mut |event| events.push(event),
+        &cancel,
+    );
+    let notices: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Notice(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("missing") && text.contains("不可用")),
+        "启动 notice 应说明降级: {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("missing: 启动失败")),
+        "/mcp 应报告启动失败: {notices:?}"
+    );
+    assert!(
+        !notices.iter().any(|text| text.contains("disabled")),
+        "enabled = false 的 server 不应被启动或报告: {notices:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
