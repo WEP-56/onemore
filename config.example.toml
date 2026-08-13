@@ -99,6 +99,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 default_model = "claude-sonnet-5"
 # api_key = "sk-ant-..."           # 不想用环境变量就直接写(请保护好此文件)
 
+# 模型 ID 含 `.` 时，表名必须加引号，例如 [providers.anthropic.models."claude-5.1-sonnet"]。
 [providers.anthropic.models."claude-sonnet-5"]
 context_window = 200000
 max_tokens = 32000
