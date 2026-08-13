@@ -49,6 +49,7 @@ impl Tool for RepoState {
         let Some(repo_root) = git_repo_root(&cwd, ctx)? else {
             return Ok(ToolOutput {
                 model_text: "Not a Git repository.".into(),
+                images: Vec::new(),
                 ui_summary: Some("not a Git repository".into()),
                 details: Some(json!({
                     "path": ctx.workspace.display_model_path(&cwd),
@@ -92,6 +93,7 @@ impl Tool for RepoState {
         }
         Ok(ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary: Some(format!("{} changed path(s)", parsed.total)),
             details: Some(json!({
                 "path": ctx.workspace.display_model_path(&cwd),
@@ -138,6 +140,7 @@ impl Tool for GitDiff {
         let Some(repo_root) = git_repo_root(&cwd, ctx)? else {
             return Ok(ToolOutput {
                 model_text: "Not a Git repository.".into(),
+                images: Vec::new(),
                 ui_summary: Some("not a Git repository".into()),
                 details: Some(
                     json!({ "path": ctx.workspace.display_model_path(&cwd), "is_git_repository": false }),
@@ -189,6 +192,7 @@ impl Tool for GitDiff {
         };
         Ok(ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary: Some(if truncated {
                 "Git diff (truncated)".into()
             } else {

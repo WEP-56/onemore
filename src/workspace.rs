@@ -99,8 +99,8 @@ impl Workspace {
 
     // ---- 文件访问原语(工具层只允许用这些) ----
 
-    /// 读文本文件。超过大小上限或非 UTF-8 会返回错误(信息面向模型,要可读)。
-    pub fn read_text(&self, path: &Path) -> Result<String, String> {
+    /// Read one regular file as bounded bytes.
+    pub fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, String> {
         let meta = fs::metadata(path).map_err(|e| io_err("读取", path, &e))?;
         if !meta.is_file() {
             return Err(format!("{} 不是文件", path.display()));
@@ -112,7 +112,12 @@ impl Workspace {
                 MAX_FILE_BYTES
             ));
         }
-        let bytes = fs::read(path).map_err(|e| io_err("读取", path, &e))?;
+        fs::read(path).map_err(|e| io_err("读取", path, &e))
+    }
+
+    /// 读文本文件。超过大小上限或非 UTF-8 会返回错误(信息面向模型,要可读)。
+    pub fn read_text(&self, path: &Path) -> Result<String, String> {
+        let bytes = self.read_bytes(path)?;
         String::from_utf8(bytes)
             .map_err(|_| format!("{} 不是 UTF-8 文本(可能是二进制文件)", path.display()))
     }

@@ -146,9 +146,20 @@ fn shorten_old_tool_results(mut messages: Vec<ChatMessage>) -> (Vec<ChatMessage>
             continue;
         }
         for block in &mut message.blocks {
-            let Block::ToolResult { content, .. } = block else {
+            let Block::ToolResult {
+                content, images, ..
+            } = block
+            else {
                 continue;
             };
+            if !images.is_empty() {
+                content.push_str(&format!(
+                    "\n[{} image attachment(s) omitted from the shortened context view]",
+                    images.len()
+                ));
+                images.clear();
+                shortened += 1;
+            }
             let total = content.chars().count();
             if total <= SHORTENED_RESULT_HEAD_CHARS {
                 continue;
@@ -210,6 +221,7 @@ mod tests {
                 ChatMessage {
                     role: Role::User,
                     blocks: vec![Block::ToolResult {
+                        images: Vec::new(),
                         tool_use_id: id.into(),
                         content: "x".repeat(result_chars),
                         is_error: false,

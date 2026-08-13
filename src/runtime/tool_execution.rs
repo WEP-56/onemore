@@ -225,7 +225,7 @@ impl DefaultToolExecutor<'_> {
                         emit(AgentEvent::ToolCallFinished {
                             id: items[item_index].id.clone(),
                             name: items[item_index].name.clone(),
-                            output: outcome.output.clone(),
+                            output: outcome.output.display_only(),
                             error: outcome.error.clone(),
                         });
                         items[item_index].outcome = Some(outcome);
@@ -279,7 +279,7 @@ impl DefaultToolExecutor<'_> {
                             emit(AgentEvent::ToolCallUpdated {
                                 id: item.id.clone(),
                                 name: item.name.clone(),
-                                output,
+                                output: output.display_only(),
                             });
                         }
                     }
@@ -330,7 +330,7 @@ impl DefaultToolExecutor<'_> {
                             emit(AgentEvent::ToolCallFinished {
                                 id: items[item_index].id.clone(),
                                 name: items[item_index].name.clone(),
-                                output: post_outcome.output.clone(),
+                                output: post_outcome.output.display_only(),
                                 error: post_outcome.error.clone(),
                             });
                             items[item_index].finish_emitted = true;

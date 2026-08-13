@@ -38,6 +38,7 @@ use crate::web::WebCapabilityBinding;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderCapabilities {
+    pub image_input: bool,
     pub encrypted_reasoning_replay: bool,
     pub reasoning_summary_stream: bool,
     pub reasoning_text_stream: bool,
@@ -59,6 +60,7 @@ impl ProviderProfile {
     pub fn capabilities(self) -> ProviderCapabilities {
         match self {
             ProviderProfile::OpenAiResponses => ProviderCapabilities {
+                image_input: true,
                 encrypted_reasoning_replay: true,
                 reasoning_summary_stream: true,
                 prompt_cache_key: true,
@@ -66,6 +68,7 @@ impl ProviderProfile {
                 ..ProviderCapabilities::default()
             },
             ProviderProfile::AnthropicMessages => ProviderCapabilities {
+                image_input: true,
                 reasoning_text_stream: true,
                 explicit_cache_control: true,
                 canonical_version_header: true,

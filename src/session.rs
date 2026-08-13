@@ -223,7 +223,14 @@ pub fn message_chars(message: &ChatMessage) -> u64 {
                 chars += name.chars().count() as u64;
                 chars += input.to_string().chars().count() as u64;
             }
-            Block::ToolResult { content, .. } => chars += content.chars().count() as u64,
+            Block::ToolResult {
+                content, images, ..
+            } => {
+                chars += content.chars().count() as u64;
+                // Provider image tokenization varies. Keep the estimate stable and
+                // bounded instead of charging the much larger base64 representation.
+                chars += images.len() as u64 * 4_000;
+            }
         }
     }
     chars
@@ -388,6 +395,7 @@ fn synthetic_results(
 fn missing_tool_result(id: &str) -> Block {
     Block::ToolResult {
         tool_use_id: id.into(),
+        images: Vec::new(),
         content: "[会话恢复修复：工具结果缺失，原调用未重新执行]".into(),
         is_error: true,
     }
@@ -614,6 +622,7 @@ mod tests {
             retained_messages: vec![ChatMessage {
                 role: Role::User,
                 blocks: vec![Block::ToolResult {
+                    images: Vec::new(),
                     tool_use_id: "orphan".into(),
                     content: "result".into(),
                     is_error: false,

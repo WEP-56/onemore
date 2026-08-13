@@ -153,6 +153,7 @@ impl Tool for Search {
         }
         Ok(ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary: Some(format!("search found {} match(es)", matches.len())),
             details: Some(json!({
                 "path": ctx.workspace.display_model_path(&root),

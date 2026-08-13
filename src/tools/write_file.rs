@@ -46,6 +46,7 @@ impl Tool for WriteFile {
         );
         Ok(ToolOutput {
             model_text: summary.clone(),
+            images: Vec::new(),
             ui_summary: Some(summary),
             details: Some(json!({
                 "path": ctx.workspace.display(&path),

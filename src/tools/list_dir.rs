@@ -66,6 +66,7 @@ impl Tool for ListDir {
         }
         Ok(ToolOutput {
             model_text: out,
+            images: Vec::new(),
             ui_summary: Some(format!("已列出 {} 个条目", count)),
             details: Some(json!({
                 "path": ctx.workspace.display(&root),

@@ -142,6 +142,7 @@ mod tests {
             ChatMessage {
                 role: Role::User,
                 blocks: vec![Block::ToolResult {
+                    images: Vec::new(),
                     tool_use_id: "call-1".into(),
                     content: "x".repeat(4_000),
                     is_error: false,

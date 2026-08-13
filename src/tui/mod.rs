@@ -1232,6 +1232,7 @@ impl App {
                     tool_use_id,
                     content,
                     is_error,
+                    ..
                 } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
                 _ => None,
             })

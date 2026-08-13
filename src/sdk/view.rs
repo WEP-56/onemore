@@ -591,6 +591,7 @@ fn tool_results(entries: &[SessionEntry]) -> HashMap<&str, (&str, bool)> {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
             _ => None,
         })
@@ -724,6 +725,7 @@ mod tests {
                     ChatMessage {
                         role: Role::User,
                         blocks: vec![Block::ToolResult {
+                            images: Vec::new(),
                             tool_use_id: "call-1".into(),
                             content: "file output".into(),
                             is_error: false,
@@ -1064,6 +1066,7 @@ mod tests {
                     ChatMessage {
                         role: Role::User,
                         blocks: vec![Block::ToolResult {
+                            images: Vec::new(),
                             tool_use_id: "call-1".into(),
                             content: "remote click failed".into(),
                             is_error: true,
@@ -1094,6 +1097,7 @@ mod tests {
     fn tool_output_view_exposes_only_allowlisted_display_metadata() {
         let output = crate::tools::ToolOutput {
             model_text: "full output".into(),
+            images: Vec::new(),
             ui_summary: Some("command succeeded".into()),
             details: Some(json!({
                 "command": "cargo test",

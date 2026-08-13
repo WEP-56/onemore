@@ -151,6 +151,7 @@ impl McpTool {
         }
         ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary: None,
             details: Some(Value::Object(details)),
         }

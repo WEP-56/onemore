@@ -127,6 +127,7 @@ impl Tool for UpdatePlan {
         ctx.record_effect(ToolEffect::PlanUpdated(snapshot));
         Ok(ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary,
             details: None,
         })

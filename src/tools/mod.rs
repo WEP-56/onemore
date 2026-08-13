@@ -6,8 +6,10 @@
 
 use std::sync::atomic::AtomicBool;
 
+use base64::Engine;
 use serde_json::Value;
 
+use crate::message::ImageContent;
 use crate::plan::PlanSnapshot;
 use crate::util;
 use crate::workspace::Workspace;
@@ -15,6 +17,7 @@ use crate::workspace::Workspace;
 mod edit_file;
 mod git;
 mod glob;
+mod image;
 mod list_dir;
 mod load_skill;
 pub(crate) mod mcp_proxy;
@@ -29,6 +32,8 @@ mod write_file;
 pub use run_command::{detect_shell, Shell};
 
 const RESULT_MAX_CHARS: usize = 24_000;
+const MAX_IMAGES_PER_OUTPUT: usize = 4;
+const MAX_INLINE_IMAGE_BASE64_BYTES: usize = 4_718_592;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionMode {
@@ -188,6 +193,8 @@ pub(crate) enum ToolEffect {
 pub struct ToolOutput {
     /// 唯一会进入 ToolResult 和模型上下文的正文。
     pub model_text: String,
+    /// Model-visible image attachments. UI/RPC projections must not expose base64 data.
+    pub images: Vec<ImageContent>,
     /// 可选的人类摘要。缺省时 UI 使用 model_text。
     pub ui_summary: Option<String>,
     /// 不进入模型的结构化信息，例如 diff、统计和截断元数据。
@@ -198,6 +205,7 @@ impl ToolOutput {
     pub fn text(text: impl Into<String>) -> Self {
         ToolOutput {
             model_text: text.into(),
+            images: Vec::new(),
             ui_summary: None,
             details: None,
         }
@@ -205,6 +213,12 @@ impl ToolOutput {
 
     pub fn ui_text(&self) -> &str {
         self.ui_summary.as_deref().unwrap_or(&self.model_text)
+    }
+
+    pub(crate) fn display_only(&self) -> Self {
+        let mut output = self.clone();
+        output.images.clear();
+        output
     }
 }
 
@@ -342,6 +356,7 @@ impl ToolOutcome {
         ToolOutcome {
             output: ToolOutput {
                 model_text: error.message.clone(),
+                images: Vec::new(),
                 ui_summary: None,
                 details: error.details.clone(),
             },
@@ -486,6 +501,32 @@ pub(crate) fn normalize_outcome(mut outcome: ToolOutcome) -> ToolOutcome {
         error.message = sanitize_and_bound(&error.message);
         // ToolOutcome::failure 从 error 构造模型 observation；保持二者严格一致。
         outcome.output.model_text = error.message.clone();
+        outcome.output.images.clear();
+    } else {
+        let original_count = outcome.output.images.len();
+        outcome.output.images.truncate(MAX_IMAGES_PER_OUTPUT);
+        let mut dropped = original_count.saturating_sub(outcome.output.images.len());
+        outcome.output.images.retain(|image| {
+            let valid_mime = matches!(
+                image.mime_type.as_str(),
+                "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+            );
+            let valid_size = image.data.len() <= MAX_INLINE_IMAGE_BASE64_BYTES;
+            let valid_base64 = valid_size
+                && base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .is_ok();
+            let keep = valid_mime && valid_size && valid_base64;
+            if !keep {
+                dropped += 1;
+            }
+            keep
+        });
+        if dropped > 0 {
+            outcome.output.model_text.push_str(&format!(
+                "\n[{dropped} invalid or oversized image attachment(s) omitted]"
+            ));
+        }
     }
     outcome
 }
@@ -778,6 +819,7 @@ mod tests {
         ) -> Result<ToolOutput, ToolError> {
             ctx.report_progress(ToolOutput {
                 model_text: "\u{1b}[31mworking\u{1b}[0m".into(),
+                images: Vec::new(),
                 ui_summary: Some("\u{1b}[32mone item\u{1b}[0m".into()),
                 details: Some(serde_json::json!({ "completed": 1 })),
             });
@@ -812,6 +854,7 @@ mod tests {
             }
             Ok(ToolOutput {
                 model_text: "\u{1b}[32m模型正文\u{1b}[0m".into(),
+                images: Vec::new(),
                 ui_summary: Some("UI 摘要".into()),
                 details: Some(serde_json::json!({"count": 1})),
             })
@@ -859,6 +902,23 @@ mod tests {
             registry.specs()[0].capabilities,
             ToolCapabilities::READ_ONLY
         );
+    }
+
+    #[test]
+    fn display_only_output_drops_image_payload() {
+        let output = ToolOutput {
+            model_text: "path.png".into(),
+            images: vec![crate::message::ImageContent {
+                data: "aGk=".into(),
+                mime_type: "image/png".into(),
+            }],
+            ui_summary: Some("path.png".into()),
+            details: None,
+        };
+        let display = output.display_only();
+        assert!(display.images.is_empty());
+        assert_eq!(display.model_text, output.model_text);
+        assert_eq!(display.ui_summary, output.ui_summary);
     }
 
     #[test]

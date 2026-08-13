@@ -240,6 +240,7 @@ fn preserves_tool_messages_as_provider_neutral_json() {
                 message_payload(ChatMessage {
                     role: Role::User,
                     blocks: vec![Block::ToolResult {
+                        images: Vec::new(),
                         tool_use_id: "call-1".into(),
                         content: "file body".into(),
                         is_error: false,

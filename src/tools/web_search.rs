@@ -75,6 +75,7 @@ impl Tool for WebSearchTool {
         let query = normalize_query(require_str(args, "query")?)?;
         ctx.report_progress(ToolOutput {
             model_text: format!("Searching the web for {query:?}"),
+            images: Vec::new(),
             ui_summary: Some(format!("Searching with {}", self.backend.kind().label())),
             details: Some(json!({
                 "backend": self.backend.kind(),
@@ -148,6 +149,7 @@ fn format_response(response: WebSearchResponse) -> ToolOutput {
     let result_count = details["result_count"].as_u64().unwrap_or(0);
     ToolOutput {
         model_text,
+        images: Vec::new(),
         ui_summary: Some(format!(
             "{} returned {} web source{}",
             response.backend.label(),

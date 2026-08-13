@@ -104,12 +104,42 @@ impl AnthropicProvider {
                     Block::ToolResult {
                         tool_use_id,
                         content: c,
+                        images,
                         is_error,
                     } => {
+                        let capabilities = self.settings.profile.capabilities();
+                        let tool_content = if images.is_empty() {
+                            Value::String(c.clone())
+                        } else if capabilities.image_input {
+                            let mut blocks = Vec::with_capacity(images.len() + 1);
+                            if !c.is_empty() {
+                                blocks.push(json!({"type": "text", "text": c}));
+                            } else {
+                                blocks
+                                    .push(json!({"type": "text", "text": "(see attached image)"}));
+                            }
+                            blocks.extend(images.iter().map(|image| {
+                                json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": image.mime_type,
+                                        "data": image.data,
+                                    }
+                                })
+                            }));
+                            Value::Array(blocks)
+                        } else {
+                            Value::String(format!(
+                                "{}\n[{} image attachment(s) omitted: current provider profile does not support image input]",
+                                c,
+                                images.len()
+                            ))
+                        };
                         let mut o = json!({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": c,
+                            "content": tool_content,
                         });
                         if *is_error {
                             o["is_error"] = json!(true);
@@ -465,6 +495,7 @@ mod tests {
         prompt.messages.push(ChatMessage {
             role: Role::User,
             blocks: vec![Block::ToolResult {
+                images: Vec::new(),
                 tool_use_id: "toolu_1".into(),
                 content: "内容".into(),
                 is_error: false,
@@ -495,6 +526,7 @@ mod tests {
         prompt.messages.push(ChatMessage {
             role: Role::User,
             blocks: vec![Block::ToolResult {
+                images: Vec::new(),
                 tool_use_id: "t1".into(),
                 content: "r".into(),
                 is_error: false,
@@ -505,6 +537,60 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["content"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tool_result_images_use_anthropic_base64_blocks() {
+        let mut prompt = PromptContext::default();
+        prompt.messages.push(ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "t-image".into(),
+                content: "see this".into(),
+                images: vec![crate::message::ImageContent {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                }],
+                is_error: false,
+            }],
+        });
+        let body = provider().build_body(&prompt, &[]);
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], "tool_result");
+        assert_eq!(block["content"][0]["type"], "text");
+        assert_eq!(block["content"][1]["type"], "image");
+        assert_eq!(block["content"][1]["source"]["type"], "base64");
+        assert_eq!(block["content"][1]["source"]["media_type"], "image/png");
+        assert_eq!(block["content"][1]["source"]["data"], "aGk=");
+    }
+
+    #[test]
+    fn deepseek_image_results_degrade_to_text() {
+        let mut settings = provider().settings;
+        settings.profile = ProviderProfile::DeepSeekMessages;
+        let provider = AnthropicProvider::new(settings);
+        let mut prompt = PromptContext::default();
+        prompt.messages.push(ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "toolu-deepseek-image".into(),
+                content: "image path: photo.png".into(),
+                images: vec![crate::message::ImageContent {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                }],
+                is_error: false,
+            }],
+        });
+
+        let body = provider.build_body(&prompt, &[]);
+        let content = &body["messages"][0]["content"][0]["content"];
+        assert!(content.is_string());
+        assert!(content
+            .as_str()
+            .unwrap()
+            .contains("does not support image input"));
+        assert!(!body.to_string().contains("\"type\":\"image\""));
     }
 
     #[test]

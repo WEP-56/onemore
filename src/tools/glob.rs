@@ -83,6 +83,7 @@ impl Tool for Glob {
         }
         Ok(ToolOutput {
             model_text,
+            images: Vec::new(),
             ui_summary: Some(format!("glob found {} path(s)", matches.len())),
             details: Some(json!({
                 "path": ctx.workspace.display_model_path(&root),

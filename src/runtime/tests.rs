@@ -135,6 +135,7 @@ impl Tool for RuntimeProgressTool {
     ) -> Result<ToolOutput, ToolError> {
         ctx.report_progress(ToolOutput {
             model_text: "halfway".into(),
+            images: Vec::new(),
             ui_summary: Some("1/2".into()),
             details: Some(serde_json::json!({ "completed": 1, "total": 2 })),
         });

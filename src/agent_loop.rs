@@ -97,12 +97,13 @@ pub trait AgentLoopHost {
             emit(AgentEvent::ToolCallFinished {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                output: outcome.output.clone(),
+                output: outcome.output.display_only(),
                 error: outcome.error.clone(),
             });
             results.push(Block::ToolResult {
                 tool_use_id: call.id.clone(),
                 content: outcome.output.model_text,
+                images: outcome.output.images,
                 is_error: true,
             });
         }

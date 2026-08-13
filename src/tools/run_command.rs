@@ -292,6 +292,7 @@ impl Tool for RunCommand {
         match ending {
             Ending::Exited(Some(0)) => Ok(ToolOutput {
                 model_text: out,
+                images: Vec::new(),
                 ui_summary: Some("命令执行成功".into()),
                 details: Some(json!({
                     "command": command,
@@ -484,6 +485,7 @@ fn report_command_progress(
     );
     ctx.report_progress(ToolOutput {
         model_text: preview,
+        images: Vec::new(),
         ui_summary: Some(summary),
         details: Some(json!({
             "elapsed_ms": elapsed.as_millis(),

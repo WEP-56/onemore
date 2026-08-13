@@ -72,18 +72,45 @@ impl ResponsesProvider {
                         Block::ToolResult {
                             tool_use_id,
                             content,
+                            images,
                             is_error,
                         },
                     ) => {
-                        let text = if *is_error {
+                        let mut text = if *is_error {
                             format!("ERROR: {}", content)
                         } else {
                             content.clone()
                         };
+                        let output = if images.is_empty() {
+                            Value::String(text)
+                        } else if capabilities.image_input {
+                            let mut blocks = Vec::with_capacity(images.len() + 1);
+                            if text.is_empty() {
+                                text = "(see attached image)".into();
+                            }
+                            blocks.push(json!({"type": "input_text", "text": text}));
+                            blocks.extend(images.iter().map(|image| {
+                                json!({
+                                    "type": "input_image",
+                                    "detail": "auto",
+                                    "image_url": format!(
+                                        "data:{};base64,{}",
+                                        image.mime_type, image.data
+                                    ),
+                                })
+                            }));
+                            Value::Array(blocks)
+                        } else {
+                            Value::String(format!(
+                                "{}\n[{} image attachment(s) omitted: current provider profile does not support image input]",
+                                text,
+                                images.len()
+                            ))
+                        };
                         input.push(json!({
                             "type": "function_call_output",
                             "call_id": tool_use_id,
-                            "output": text,
+                            "output": output,
                         }));
                     }
                     (Role::Assistant, Block::Text(t)) if !t.is_empty() => {
@@ -545,6 +572,7 @@ mod tests {
         prompt.messages.push(ChatMessage {
             role: Role::User,
             blocks: vec![Block::ToolResult {
+                images: Vec::new(),
                 tool_use_id: "fc_call_1".into(),
                 content: "内容".into(),
                 is_error: false,
@@ -586,6 +614,29 @@ mod tests {
         settings.web = WebCapabilityBinding::Disabled;
         let body = ResponsesProvider::new(settings).build_body(&PromptContext::default(), &[]);
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_result_images_use_responses_input_image_blocks() {
+        let mut prompt = PromptContext::default();
+        prompt.messages.push(ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "fc-image".into(),
+                content: "see this".into(),
+                images: vec![crate::message::ImageContent {
+                    data: "aGk=".into(),
+                    mime_type: "image/jpeg".into(),
+                }],
+                is_error: false,
+            }],
+        });
+        let body = provider().build_body(&prompt, &[]);
+        let output = &body["input"][0]["output"];
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["detail"], "auto");
+        assert_eq!(output[1]["image_url"], "data:image/jpeg;base64,aGk=");
     }
 
     #[test]
@@ -641,5 +692,34 @@ mod tests {
         assert!(body.get("store").is_none());
         assert!(body.get("include").is_none());
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn deepseek_image_results_degrade_to_text() {
+        let mut settings = provider().settings;
+        settings.profile = ProviderProfile::DeepSeekResponses;
+        let provider = ResponsesProvider::new(settings);
+        let mut prompt = PromptContext::default();
+        prompt.messages.push(ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "fc-deepseek-image".into(),
+                content: "image path: photo.png".into(),
+                images: vec![crate::message::ImageContent {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                }],
+                is_error: false,
+            }],
+        });
+
+        let body = provider.build_body(&prompt, &[]);
+        let output = &body["input"][0]["output"];
+        assert!(output.is_string());
+        assert!(output
+            .as_str()
+            .unwrap()
+            .contains("does not support image input"));
+        assert!(!body.to_string().contains("input_image"));
     }
 }

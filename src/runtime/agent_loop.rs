@@ -305,7 +305,7 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
                     emit(AgentEvent::ToolCallFinished {
                         id: item.id.clone(),
                         name: item.name.clone(),
-                        output: outcome.output.clone(),
+                        output: outcome.output.display_only(),
                         error: outcome.error.clone(),
                     });
                     item.finish_emitted = true;
@@ -350,6 +350,7 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
             results.push(Block::ToolResult {
                 tool_use_id: item.id,
                 content: outcome.output.model_text,
+                images: outcome.output.images,
                 is_error: outcome.error.is_some(),
             });
         }
@@ -374,7 +375,7 @@ impl AgentLoopHost for StatefulLoopHost<'_> {
             emit(AgentEvent::ToolCallFinished {
                 id,
                 name,
-                output,
+                output: output.display_only(),
                 error,
             });
         }

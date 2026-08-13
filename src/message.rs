@@ -36,6 +36,13 @@ pub struct ChatMessage {
     pub blocks: Vec<Block>,
 }
 
+/// Model-visible inline image data. `data` is standard base64 without a data-URL prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageContent {
+    pub data: String,
+    pub mime_type: String,
+}
+
 /// 消息里的一个内容块。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Block {
@@ -70,6 +77,8 @@ pub enum Block {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageContent>,
         is_error: bool,
     },
 }
@@ -111,6 +120,56 @@ impl ChatMessage {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_tool_result_json_defaults_to_no_images() {
+        let message: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "User",
+            "blocks": [{
+                "ToolResult": {
+                    "tool_use_id": "call-1",
+                    "content": "legacy result",
+                    "is_error": false
+                }
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            &message.blocks[0],
+            Block::ToolResult { content, images, .. }
+                if content == "legacy result" && images.is_empty()
+        ));
+    }
+
+    #[test]
+    fn image_data_is_serialized_only_in_model_history() {
+        let message = ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: "image result".into(),
+                images: vec![ImageContent {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                }],
+                is_error: false,
+            }],
+        };
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(
+            value["blocks"][0]["ToolResult"]["images"][0]["mime_type"],
+            "image/png"
+        );
+        assert_eq!(
+            value["blocks"][0]["ToolResult"]["images"][0]["data"],
+            "aGk="
+        );
     }
 }
 
